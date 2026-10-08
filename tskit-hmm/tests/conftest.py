@@ -20,29 +20,10 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 """
-Configuration and fixtures for pytest. Only put test-suite wide fixtures in here. Module
-specific fixtures should live in their modules.
-
-To use a fixture in a test simply refer to it by name as an argument. This is called
-dependency injection. Note that all fixtures should have the suffix "_fixture" to make
-it clear in test code.
-
-For example to use the `ts` fixture (a tree sequence with data in all fields) in a test:
-
-class TestClass:
-    def test_something(self, ts_fixture):
-        assert ts_fixture.some_method() == expected
-
-Fixtures can be parameterised etc. see https://docs.pytest.org/en/stable/fixture.html
-
-Note that fixtures have a "scope" for example `ts_fixture` below is only created once
-per test session and re-used for subsequent tests.
+Configuration for pytest.
 """
 
-import msprime
 import pytest
-
-from . import tsutil
 
 
 def pytest_addoption(parser):
@@ -52,24 +33,6 @@ def pytest_addoption(parser):
     parser.addoption(
         "--skip-slow", action="store_true", default=False, help="Skip slow tests"
     )
-    parser.addoption(
-        "--skip-network",
-        action="store_true",
-        default=False,
-        help="Skip network/FIFO tests",
-    )
-    parser.addoption(
-        "--overwrite-expected-visualizations",
-        action="store_true",
-        default=False,
-        help="Overwrite the expected viz files in tests/data/svg/",
-    )
-    parser.addoption(
-        "--draw-svg-debug-box",
-        action="store_true",
-        default=False,
-        help="To help debugging, draw lines around the plotboxes in SVG output files",
-    )
 
 
 def pytest_configure(config):
@@ -77,7 +40,6 @@ def pytest_configure(config):
     Add docs on the "slow" marker
     """
     config.addinivalue_line("markers", "slow: mark test as slow to run")
-    config.addinivalue_line("markers", "network: mark test as using network/FIFO")
 
 
 def pytest_collection_modifyitems(config, items):
@@ -86,54 +48,3 @@ def pytest_collection_modifyitems(config, items):
         for item in items:
             if "slow" in item.keywords:
                 item.add_marker(skip_slow)
-    if config.getoption("--skip-network"):
-        skip_network = pytest.mark.skip(reason="--skip-network specified")
-        for item in items:
-            if "network" in item.keywords:
-                item.add_marker(skip_network)
-
-
-@pytest.fixture
-def overwrite_viz(request):
-    return request.config.getoption("--overwrite-expected-visualizations")
-
-
-@pytest.fixture
-def draw_plotbox(request):
-    return request.config.getoption("--draw-svg-debug-box")
-
-
-@pytest.fixture(scope="session")
-def simple_degree1_ts_fixture():
-    return msprime.simulate(10, random_seed=42)
-
-
-@pytest.fixture(scope="session")
-def simple_degree2_ts_fixture():
-    ts = msprime.simulate(10, recombination_rate=0.2, random_seed=42)
-    assert ts.num_trees == 2
-    return ts
-
-
-@pytest.fixture(scope="session")
-def ts_fixture():
-    """
-    A tree sequence with data in all fields
-    """
-    return tsutil.all_fields_ts()
-
-
-@pytest.fixture(scope="session")
-def ts_fixture_for_simplify():
-    """
-    A tree sequence with data in all fields execpt edge metadata and migrations
-    """
-    return tsutil.all_fields_ts(edge_metadata=False, migrations=False)
-
-
-@pytest.fixture(scope="session")
-def replicate_ts_fixture():
-    """
-    A list of tree sequences
-    """
-    return list(msprime.simulate(10, num_replicates=10, random_seed=42))

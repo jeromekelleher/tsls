@@ -29,7 +29,7 @@
 #include <float.h>
 #include <assert.h>
 
-#include <tskit/haplotype_matching.h>
+#include "haplotype_matching.h"
 
 #define MAX_PARSIMONY_WORDS 256
 

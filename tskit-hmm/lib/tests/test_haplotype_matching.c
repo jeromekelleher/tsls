@@ -23,7 +23,7 @@
  */
 
 #include "testlib.h"
-#include <tskit/haplotype_matching.h>
+#include "haplotype_matching.h"
 
 #include <unistd.h>
 #include <stdlib.h>

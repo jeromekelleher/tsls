@@ -31,8 +31,9 @@ import numpy as np
 import numpy.testing as nt
 import pytest
 
-import _tskit
+import _tskit_hmm
 import tskit
+import tskit_hmm
 from tests import tsutil
 
 MISSING = -1
@@ -1116,9 +1117,9 @@ def check_viterbi(ts, h, recombination=None, mutation=None):
     )
     nt.assert_allclose(ll_check, ll)
 
-    ll_ts = ts._ll_tree_sequence
-    ls_hmm = _tskit.LsHmm(ll_ts, recombination, mutation, precision=precision)
-    cm_lib = _tskit.ViterbiMatrix(ll_ts)
+    ll_ts = tskit_hmm.ll_tree_sequence(ts)
+    ls_hmm = _tskit_hmm.LsHmm(ll_ts, recombination, mutation, precision=precision)
+    cm_lib = _tskit_hmm.ViterbiMatrix(ll_ts)
     ls_hmm.viterbi_matrix(h, cm_lib)
     path_lib = cm_lib.traceback()
 
@@ -1166,9 +1167,9 @@ def check_forward_matrix(ts, h, recombination=None, mutation=None):
     ll_tree = np.sum(np.log10(cm.normalisation_factor))
     nt.assert_allclose(ll_tree, ll)
 
-    ll_ts = ts._ll_tree_sequence
-    ls_hmm = _tskit.LsHmm(ll_ts, recombination, mutation, precision=precision)
-    cm_lib = _tskit.CompressedMatrix(ll_ts)
+    ll_ts = tskit_hmm.ll_tree_sequence(ts)
+    ls_hmm = _tskit_hmm.LsHmm(ll_ts, recombination, mutation, precision=precision)
+    cm_lib = _tskit_hmm.CompressedMatrix(ll_ts)
     ls_hmm.forward_matrix(h, cm_lib)
     F3 = cm_lib.decode()
 
@@ -1214,9 +1215,9 @@ def check_backward_matrix(ts, h, forward_cm, recombination=None, mutation=None):
         backward_cm.normalisation_factor, forward_cm.normalisation_factor
     )
 
-    ll_ts = ts._ll_tree_sequence
-    ls_hmm = _tskit.LsHmm(ll_ts, recombination, mutation, precision=precision)
-    cm_lib = _tskit.CompressedMatrix(ll_ts)
+    ll_ts = tskit_hmm.ll_tree_sequence(ts)
+    ls_hmm = _tskit_hmm.LsHmm(ll_ts, recombination, mutation, precision=precision)
+    cm_lib = _tskit_hmm.CompressedMatrix(ll_ts)
     ls_hmm.backward_matrix(h, forward_cm.normalisation_factor, cm_lib)
 
     assert_compressed_matrices_equal(backward_cm, cm_lib)

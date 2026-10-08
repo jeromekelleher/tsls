@@ -23,6 +23,166 @@
  * SOFTWARE.
  */
 
+#define PY_SSIZE_T_CLEAN
+#include <Python.h>
+#define NPY_NO_DEPRECATED_API NPY_2_0_API_VERSION
+#include <numpy/arrayobject.h>
+
+#include <structmember.h>
+#include <float.h>
+
+#include "kastore.h"
+/* Include our copy of the HMM header before tskit.h, so that the include
+ * guard stops tskit's own copy from being used. */
+#include "haplotype_matching.h"
+#include "tskit.h"
+
+static PyObject *TskitHmmLibraryError;
+
+#include "tskit_lwt_interface.h"
+
+static void
+handle_library_error(int err)
+{
+    if (err == TSK_ERR_NO_MEMORY) {
+        PyErr_NoMemory();
+    } else {
+        PyErr_SetString(TskitHmmLibraryError, tsk_strerror(err));
+    }
+}
+
+/*===================================================================
+ * TreeSequence
+ *===================================================================
+ */
+
+/* A minimal tree sequence type, built from a LightweightTableCollection,
+ * standing in for the _tskit.TreeSequence that the HMM classes were
+ * written against. */
+typedef struct {
+    PyObject_HEAD
+    tsk_treeseq_t *tree_sequence;
+} TreeSequence;
+
+static int
+TreeSequence_check_state(TreeSequence *self)
+{
+    int ret = 0;
+    if (self->tree_sequence == NULL) {
+        PyErr_SetString(PyExc_ValueError, "tree_sequence not initialised");
+        ret = -1;
+    }
+    return ret;
+}
+
+static void
+TreeSequence_dealloc(TreeSequence *self)
+{
+    if (self->tree_sequence != NULL) {
+        tsk_treeseq_free(self->tree_sequence);
+        PyMem_Free(self->tree_sequence);
+        self->tree_sequence = NULL;
+    }
+    Py_TYPE(self)->tp_free((PyObject *) self);
+}
+
+static int
+TreeSequence_init(TreeSequence *self, PyObject *args, PyObject *kwds)
+{
+    int ret = -1;
+    int err;
+    LightweightTableCollection *tables = NULL;
+    static char *kwlist[] = { "tables", NULL };
+
+    self->tree_sequence = NULL;
+    if (!PyArg_ParseTupleAndKeywords(
+            args, kwds, "|O!", kwlist, &LightweightTableCollectionType, &tables)) {
+        goto out;
+    }
+    if (tables == NULL) {
+        /* Leave uninitialised */
+        ret = 0;
+        goto out;
+    }
+    if (LightweightTableCollection_check_state(tables) != 0) {
+        goto out;
+    }
+    self->tree_sequence = PyMem_Calloc(1, sizeof(*self->tree_sequence));
+    if (self->tree_sequence == NULL) {
+        PyErr_NoMemory();
+        goto out;
+    }
+    err = tsk_treeseq_init(
+        self->tree_sequence, tables->tables, TSK_TS_INIT_BUILD_INDEXES);
+    if (err != 0) {
+        handle_library_error(err);
+        goto out;
+    }
+    ret = 0;
+out:
+    return ret;
+}
+
+static PyObject *
+TreeSequence_get_num_nodes(TreeSequence *self, PyObject *Py_UNUSED(ignored))
+{
+    if (TreeSequence_check_state(self) != 0) {
+        return NULL;
+    }
+    return Py_BuildValue(
+        "n", (Py_ssize_t) tsk_treeseq_get_num_nodes(self->tree_sequence));
+}
+
+static PyObject *
+TreeSequence_get_num_samples(TreeSequence *self, PyObject *Py_UNUSED(ignored))
+{
+    if (TreeSequence_check_state(self) != 0) {
+        return NULL;
+    }
+    return Py_BuildValue(
+        "n", (Py_ssize_t) tsk_treeseq_get_num_samples(self->tree_sequence));
+}
+
+static PyObject *
+TreeSequence_get_num_sites(TreeSequence *self, PyObject *Py_UNUSED(ignored))
+{
+    if (TreeSequence_check_state(self) != 0) {
+        return NULL;
+    }
+    return Py_BuildValue(
+        "n", (Py_ssize_t) tsk_treeseq_get_num_sites(self->tree_sequence));
+}
+
+static PyMethodDef TreeSequence_methods[] = {
+    { .ml_name = "get_num_nodes",
+        .ml_meth = (PyCFunction) TreeSequence_get_num_nodes,
+        .ml_flags = METH_NOARGS,
+        .ml_doc = "Returns the number of nodes in the tree sequence." },
+    { .ml_name = "get_num_samples",
+        .ml_meth = (PyCFunction) TreeSequence_get_num_samples,
+        .ml_flags = METH_NOARGS,
+        .ml_doc = "Returns the number of samples in the tree sequence." },
+    { .ml_name = "get_num_sites",
+        .ml_meth = (PyCFunction) TreeSequence_get_num_sites,
+        .ml_flags = METH_NOARGS,
+        .ml_doc = "Returns the number of sites in the tree sequence." },
+    { NULL } /* Sentinel */
+};
+
+static PyTypeObject TreeSequenceType = {
+    // clang-format off
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "_tskit_hmm.TreeSequence",
+    .tp_basicsize = sizeof(TreeSequence),
+    .tp_dealloc = (destructor) TreeSequence_dealloc,
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_doc = "TreeSequence objects",
+    .tp_methods = TreeSequence_methods,
+    .tp_init = (initproc) TreeSequence_init,
+    .tp_new = PyType_GenericNew,
+    // clang-format on
+};
+
 typedef struct {
     PyObject_HEAD
     TreeSequence *tree_sequence;
@@ -288,7 +448,7 @@ static PyMethodDef CompressedMatrix_methods[] = {
 static PyTypeObject CompressedMatrixType = {
     // clang-format off
     PyVarObject_HEAD_INIT(NULL, 0)
-    .tp_name = "_tskit.CompressedMatrix",
+    .tp_name = "_tskit_hmm.CompressedMatrix",
     .tp_basicsize = sizeof(CompressedMatrix),
     .tp_dealloc = (destructor) CompressedMatrix_dealloc,
     .tp_flags = Py_TPFLAGS_DEFAULT,
@@ -528,7 +688,7 @@ static PyMethodDef ViterbiMatrix_methods[] = {
 static PyTypeObject ViterbiMatrixType = {
     // clang-format off
     PyVarObject_HEAD_INIT(NULL, 0)
-    .tp_name = "_tskit.ViterbiMatrix",
+    .tp_name = "_tskit_hmm.ViterbiMatrix",
     .tp_basicsize = sizeof(ViterbiMatrix),
     .tp_dealloc = (destructor) ViterbiMatrix_dealloc,
     .tp_flags = Py_TPFLAGS_DEFAULT,
@@ -807,7 +967,7 @@ static PyMethodDef LsHmm_methods[] = {
 static PyTypeObject LsHmmType = {
     // clang-format off
     PyVarObject_HEAD_INIT(NULL, 0)
-    .tp_name = "_tskit.LsHmm",
+    .tp_name = "_tskit_hmm.LsHmm",
     .tp_basicsize = sizeof(LsHmm),
     .tp_dealloc = (destructor) LsHmm_dealloc,
     .tp_flags = Py_TPFLAGS_DEFAULT,
@@ -818,6 +978,37 @@ static PyTypeObject LsHmmType = {
     // clang-format on
 };
 
+/*===================================================================
+ * Module level code.
+ *===================================================================
+ */
+
+static struct PyModuleDef tskithmmmodule = {
+    .m_base = PyModuleDef_HEAD_INIT,
+    .m_name = "_tskit_hmm",
+    .m_doc = "Low-level tskit HMM interface.",
+    .m_size = -1,
+};
+
+PyMODINIT_FUNC
+PyInit__tskit_hmm(void)
+{
+    PyObject *module = PyModule_Create(&tskithmmmodule);
+    if (module == NULL) {
+        return NULL;
+    }
+    import_array();
+
+    if (register_lwt_class(module) != 0) {
+        return NULL;
+    }
+
+    /* TreeSequence type */
+    if (PyType_Ready(&TreeSequenceType) < 0) {
+        return NULL;
+    }
+    Py_INCREF(&TreeSequenceType);
+    PyModule_AddObject(module, "TreeSequence", (PyObject *) &TreeSequenceType);
 
     /* CompressedMatrix type */
     if (PyType_Ready(&CompressedMatrixType) < 0) {
@@ -840,3 +1031,10 @@ static PyTypeObject LsHmmType = {
     Py_INCREF(&LsHmmType);
     PyModule_AddObject(module, "LsHmm", (PyObject *) &LsHmmType);
 
+    TskitHmmLibraryError
+        = PyErr_NewException("_tskit_hmm.LibraryError", NULL, NULL);
+    Py_INCREF(TskitHmmLibraryError);
+    PyModule_AddObject(module, "LibraryError", TskitHmmLibraryError);
+
+    return module;
+}
