@@ -32,101 +32,15 @@ import numpy as np
 import pytest
 import tskit
 
-import _tsinfer
-from tsinfer import arg_ops
+import _tsinfer_hmm
+from tsinfer_hmm import arg_ops
 
 IS_WINDOWS = sys.platform == "win32"
 
 
-class TestAncestorBuilder:
-    """
-    Tests for the AncestorBuilder C Python interface.
-    """
-
-    def test_init(self):
-        with pytest.raises(TypeError):
-            _tsinfer.AncestorBuilder()
-        for bad_value in [None, "serf", [[], []], ["asdf"], {}]:
-            with pytest.raises(TypeError):
-                _tsinfer.AncestorBuilder(num_samples=2, max_sites=bad_value)
-            with pytest.raises(TypeError):
-                _tsinfer.AncestorBuilder(num_samples=bad_value, max_sites=2)
-            with pytest.raises(TypeError):
-                _tsinfer.AncestorBuilder(
-                    num_samples=2, max_sites=2, genotype_encoding=bad_value
-                )
-            with pytest.raises(TypeError):
-                _tsinfer.AncestorBuilder(num_samples=2, max_sites=2, mmap_fd=bad_value)
-        for bad_num_samples in [0, 1]:
-            with pytest.raises(_tsinfer.LibraryError):
-                _tsinfer.AncestorBuilder(num_samples=bad_num_samples, max_sites=0)
-
-    @pytest.mark.skipif(IS_WINDOWS, reason="mmap_fd is a no-op on Windows")
-    def test_bad_fd(self):
-        with pytest.raises(_tsinfer.LibraryError, match="Bad file desc"):
-            _tsinfer.AncestorBuilder(num_samples=2, max_sites=2, mmap_fd=-2)
-
-    def test_add_site(self):
-        ab = _tsinfer.AncestorBuilder(num_samples=2, max_sites=10)
-        for bad_type in ["sdf", {}, None]:
-            with pytest.raises(TypeError):
-                ab.add_site(time=bad_type, genotypes=[0, 0])
-        for bad_genotypes in ["asdf", [[], []], [0, 1, 2]]:
-            with pytest.raises(ValueError):
-                ab.add_site(time=0, genotypes=bad_genotypes)
-
-    def test_add_too_many_sites(self):
-        for max_sites in range(10):
-            ab = _tsinfer.AncestorBuilder(num_samples=2, max_sites=max_sites)
-            for _ in range(max_sites):
-                ab.add_site(time=1, genotypes=[0, 1])
-            for _ in range(2 * max_sites):
-                with pytest.raises(_tsinfer.LibraryError) as record:
-                    ab.add_site(time=1, genotypes=[0, 1])
-                msg = "Cannot add more sites than the specified maximum."
-                assert str(record.value) == msg
-
-    def test_make_ancestor(self):
-        ab = _tsinfer.AncestorBuilder(num_samples=2, max_sites=2)
-        ab.add_site(time=1, genotypes=[0, 1])
-        ab.add_site(time=2, genotypes=[1, 0])
-        for _, focal_sites in ab.ancestor_descriptors():
-            a = np.zeros(2, dtype=np.int8)
-            start, end = ab.make_ancestor(focal_sites, a)
-            assert start == 0
-            assert end == 2
-            assert np.all(a[:2] >= 0)
-
-    def test_getters(self):
-        ab = _tsinfer.AncestorBuilder(num_samples=2, max_sites=2)
-        ab.add_site(time=1, genotypes=[0, 1])
-        ab.add_site(time=2, genotypes=[1, 0])
-        A = list(ab.ancestor_descriptors())
-        assert ab.num_sites == 2
-        assert ab.num_ancestors == len(A)
-        assert ab.mem_size > 0
-
-    def test_make_ancestor_errors(self):
-        ab = _tsinfer.AncestorBuilder(num_samples=2, max_sites=1)
-        ab.add_site(time=1, genotypes=[0, 1])
-        a = np.zeros(1, dtype=np.int8)
-        with pytest.raises(TypeError):
-            ab.make_ancestor()
-        with pytest.raises(ValueError, match="num_focal_sites must > 0"):
-            ab.make_ancestor([], a)
-        with pytest.raises(ValueError, match="x"):
-            ab.make_ancestor(["x"], a)
-        with pytest.raises(ValueError, match="Dim != 1"):
-            ab.make_ancestor([[0, 1]], a)
-        with pytest.raises(TypeError, match="Cannot cast"):
-            ab.make_ancestor([0], np.array(["type"]))
-        with pytest.raises(ValueError, match="wrong size"):
-            ab.make_ancestor([0], np.zeros(100, dtype=np.int8))
-
-
 class TestUninitialised:
     def test_uninitialised(self):
-        for _, cls in inspect.getmembers(_tsinfer):
+        for _, cls in inspect.getmembers(_tsinfer_hmm):
             if (
                 isinstance(cls, type)
                 and not issubclass(cls, Exception)
@@ -161,12 +75,12 @@ def make_matcher_indexes_and_matcher(num_samples=4):
     tables.mutations.add_row(site=0, node=1, derived_state="T")
     ts = tables.tree_sequence()
     ts = arg_ops.add_vestigial_root(ts)
-    ll_tables = _tsinfer.LightweightTableCollection(ts.sequence_length)
+    ll_tables = _tsinfer_hmm.LightweightTableCollection(ts.sequence_length)
     ll_tables.fromdict(ts.dump_tables().asdict())
-    mi = _tsinfer.MatcherIndexes(ll_tables)
+    mi = _tsinfer_hmm.MatcherIndexes(ll_tables)
     recombination = np.array([1e-9])
     mismatch = np.array([0.0])
-    am = _tsinfer.AncestorMatcher(mi, recombination=recombination, mismatch=mismatch)
+    am = _tsinfer_hmm.AncestorMatcher(mi, recombination=recombination, mismatch=mismatch)
     return ts, mi, am
 
 
@@ -204,9 +118,9 @@ class TestAncestorMatcher:
         ts, mi, _ = make_matcher_indexes_and_matcher()
         mismatch = np.array([0.0])
         with pytest.raises(ValueError):
-            _tsinfer.AncestorMatcher(mi, recombination="bad", mismatch=mismatch)
+            _tsinfer_hmm.AncestorMatcher(mi, recombination="bad", mismatch=mismatch)
         with pytest.raises(ValueError, match="Size of recombination"):
-            _tsinfer.AncestorMatcher(
+            _tsinfer_hmm.AncestorMatcher(
                 mi, recombination=np.array([1e-9, 1e-9]), mismatch=mismatch
             )
 
@@ -214,15 +128,15 @@ class TestAncestorMatcher:
         ts, mi, _ = make_matcher_indexes_and_matcher()
         recombination = np.array([1e-9])
         with pytest.raises(ValueError):
-            _tsinfer.AncestorMatcher(mi, recombination=recombination, mismatch="bad")
+            _tsinfer_hmm.AncestorMatcher(mi, recombination=recombination, mismatch="bad")
         with pytest.raises(ValueError, match="Size of mismatch"):
-            _tsinfer.AncestorMatcher(
+            _tsinfer_hmm.AncestorMatcher(
                 mi, recombination=recombination, mismatch=np.array([0.0, 0.0])
             )
 
     def test_init_extended_checks(self):
         ts, mi, _ = make_matcher_indexes_and_matcher()
-        am = _tsinfer.AncestorMatcher(
+        am = _tsinfer_hmm.AncestorMatcher(
             mi,
             recombination=np.array([1e-9]),
             mismatch=np.array([0.0]),
@@ -232,7 +146,7 @@ class TestAncestorMatcher:
 
     def test_init_weight_by_n_false(self):
         ts, mi, _ = make_matcher_indexes_and_matcher()
-        am = _tsinfer.AncestorMatcher(
+        am = _tsinfer_hmm.AncestorMatcher(
             mi,
             recombination=np.array([1e-9]),
             mismatch=np.array([0.0]),
@@ -273,16 +187,16 @@ class TestAncestorMatcher:
         # No mutations: all nodes carry allele 0
         ts = tables.tree_sequence()
         ts = arg_ops.add_vestigial_root(ts)
-        ll_tables = _tsinfer.LightweightTableCollection(ts.sequence_length)
+        ll_tables = _tsinfer_hmm.LightweightTableCollection(ts.sequence_length)
         ll_tables.fromdict(ts.dump_tables().asdict())
-        mi = _tsinfer.MatcherIndexes(ll_tables)
-        am = _tsinfer.AncestorMatcher(
+        mi = _tsinfer_hmm.MatcherIndexes(ll_tables)
+        am = _tsinfer_hmm.AncestorMatcher(
             mi,
             recombination=np.array([1e-9]),
             mismatch=np.array([0.0]),
         )
         h = np.array([1], dtype=np.int8)
-        with pytest.raises(_tsinfer.MatchImpossible):
+        with pytest.raises(_tsinfer_hmm.MatchImpossible):
             am.find_path(h, 0, ts.num_sites)
 
     def test_get_traceback(self):
@@ -306,33 +220,33 @@ class TestMatcherIndexes:
         ts = tskit.Tree.generate_balanced(4).tree_sequence
         ts = arg_ops.add_vestigial_root(ts)
         tables = ts.dump_tables()
-        ll_tables = _tsinfer.LightweightTableCollection(tables.sequence_length)
+        ll_tables = _tsinfer_hmm.LightweightTableCollection(tables.sequence_length)
         ll_tables.fromdict(tables.asdict())
-        _ = _tsinfer.MatcherIndexes(ll_tables)
+        _ = _tsinfer_hmm.MatcherIndexes(ll_tables)
 
     def test_node_0_not_root(self):
         ts = tskit.Tree.generate_balanced(4).tree_sequence
         tables = ts.dump_tables()
-        ll_tables = _tsinfer.LightweightTableCollection(tables.sequence_length)
+        ll_tables = _tsinfer_hmm.LightweightTableCollection(tables.sequence_length)
         ll_tables.fromdict(tables.asdict())
-        with pytest.raises(_tsinfer.LibraryError, match="Node 0 must be the root"):
-            _tsinfer.MatcherIndexes(ll_tables)
+        with pytest.raises(_tsinfer_hmm.LibraryError, match="Node 0 must be the root"):
+            _tsinfer_hmm.MatcherIndexes(ll_tables)
 
     def test_num_alleles(self):
         ts, mi, _ = make_matcher_indexes_and_matcher()
         num_alleles = np.array([2] * ts.num_sites, dtype=np.uint64)
-        ll_tables = _tsinfer.LightweightTableCollection(ts.sequence_length)
+        ll_tables = _tsinfer_hmm.LightweightTableCollection(ts.sequence_length)
         ll_tables.fromdict(ts.dump_tables().asdict())
-        mi = _tsinfer.MatcherIndexes(ll_tables, num_alleles=num_alleles)
+        mi = _tsinfer_hmm.MatcherIndexes(ll_tables, num_alleles=num_alleles)
         assert mi is not None
 
     def test_print_state(self, tmpdir):
         ts = tskit.Tree.generate_balanced(4).tree_sequence
         ts = arg_ops.add_vestigial_root(ts)
         tables = ts.dump_tables()
-        ll_tables = _tsinfer.LightweightTableCollection(tables.sequence_length)
+        ll_tables = _tsinfer_hmm.LightweightTableCollection(tables.sequence_length)
         ll_tables.fromdict(tables.asdict())
-        mi = _tsinfer.MatcherIndexes(ll_tables)
+        mi = _tsinfer_hmm.MatcherIndexes(ll_tables)
         with pytest.raises(TypeError):
             mi.print_state()
 
@@ -348,8 +262,8 @@ class TestMatcherIndexes:
         ts = tskit.Tree.generate_balanced(4).tree_sequence
         ts = arg_ops.add_vestigial_root(ts)
         tables = ts.dump_tables()
-        ll_tables = _tsinfer.LightweightTableCollection(tables.sequence_length)
+        ll_tables = _tsinfer_hmm.LightweightTableCollection(tables.sequence_length)
         ll_tables.fromdict(tables.asdict())
-        mi = _tsinfer.MatcherIndexes(ll_tables)
+        mi = _tsinfer_hmm.MatcherIndexes(ll_tables)
         with pytest.raises(TypeError):
             mi.print_state("not a file")

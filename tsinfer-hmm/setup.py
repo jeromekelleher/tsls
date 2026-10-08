@@ -7,25 +7,23 @@ from setuptools import Extension, setup
 IS_WINDOWS = platform.system() == "Windows"
 
 libdir = "lib"
-tskroot = os.path.join("git-submodules", "tskit", "c")
+tskroot = os.path.join("..", "git-submodules", "tskit", "c")
 tskdir = os.path.join(tskroot, "tskit")
 kasdir = os.path.join(tskroot, "subprojects", "kastore")
 includes = ["lwt_interface", libdir, tskroot, tskdir, kasdir]
 
 tsi_source_files = [
     "ancestor_matcher.c",
-    "ancestor_builder.c",
     "err.c",
-    "avl.c",
     "tsi_blkalloc.c",
 ]
-# We're not actually using very much of tskit at the moment, so
-# just build the stuff we need.
-tsk_source_files = ["core.c", "tables.c", "trees.c", "genotypes.c"]
+# The matcher only needs the tskit core and the table code used by the
+# LightweightTableCollection interface.
+tsk_source_files = ["core.c", "tables.c"]
 kas_source_files = ["kastore.c"]
 
 sources = (
-    ["_tsinfermodule.c"]
+    ["_tsinfer_hmm_module.c"]
     + [os.path.join(libdir, f) for f in tsi_source_files]
     + [os.path.join(tskdir, f) for f in tsk_source_files]
     + [os.path.join(kasdir, f) for f in kas_source_files]
@@ -35,8 +33,8 @@ libraries = ["Advapi32"] if IS_WINDOWS else []
 
 extra_compile_args = [] if IS_WINDOWS else ["-std=c11"]
 
-_tsinfer_module = Extension(
-    "_tsinfer",
+_tsinfer_hmm_module = Extension(
+    "_tsinfer_hmm",
     sources=sources,
     extra_compile_args=extra_compile_args,
     libraries=libraries,
@@ -45,5 +43,5 @@ _tsinfer_module = Extension(
 )
 
 setup(
-    ext_modules=[_tsinfer_module],
+    ext_modules=[_tsinfer_hmm_module],
 )

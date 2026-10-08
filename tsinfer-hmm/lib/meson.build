@@ -1,5 +1,7 @@
-project('tsinfer', 'c', default_options: ['c_std=c11'])
- 
+project('tsinfer-hmm', 'c', default_options: ['c_std=c11'])
+
+# lib/subprojects/tskit is a symlink to the tskit C library in the
+# git-submodules/tskit submodule at the root of the repository.
 tskit_proj = subproject('tskit')
 tskit_dep = tskit_proj.get_variable('tskit_dep')
 
@@ -15,13 +17,11 @@ extra_c_args = [
     '-fshort-enums', '-fno-common']
 
 tsinfer_sources =[
-    'ancestor_matcher.c', 'ancestor_builder.c',
-    'err.c', 'tsi_blkalloc.c']
+    'ancestor_matcher.c', 'err.c', 'tsi_blkalloc.c']
 
-avl_lib = static_library('avl', sources: ['avl.c'])
-tsinfer_lib = static_library('tsinfer', 
-    sources: tsinfer_sources, dependencies: [m_dep, tskit_dep], 
-    c_args: extra_c_args, link_with:[avl_lib])
+tsinfer_lib = static_library('tsinfer',
+    sources: tsinfer_sources, dependencies: [m_dep, tskit_dep],
+    c_args: extra_c_args)
 
 src_root = meson.project_source_root()
 

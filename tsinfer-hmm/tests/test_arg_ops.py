@@ -1,7 +1,7 @@
 import pytest
 import tskit
 
-from tsinfer import arg_ops
+from tsinfer_hmm import arg_ops
 
 
 class TestAddVestigialRoot:

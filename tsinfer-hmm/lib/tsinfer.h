@@ -41,7 +41,6 @@
 
 #include "tskit.h"
 #include "err.h"
-#include "avl.h"
 
 /* TODO remove this when we update tskit version. */
 #define TSK_MISSING_DATA (-1)
@@ -56,8 +55,6 @@
 
 #define TSI_EXTENDED_CHECKS     1
 #define TSI_DISABLE_WEIGHT_BY_N 2
-
-#define TSI_GENOTYPE_ENCODING_ONE_BIT 1
 
 typedef int8_t allele_t;
 /* TODO should probably change to uint32 when we have removed the old code.*/
@@ -90,72 +87,6 @@ typedef struct {
     tsk_id_t parent;
     tsk_id_t child;
 } edge_t;
-
-typedef struct _node_segment_list_node_t {
-    tsk_id_t start;
-    tsk_id_t end;
-    struct _node_segment_list_node_t *next;
-} node_segment_list_node_t;
-
-typedef struct {
-    double time;
-    uint8_t *encoded_genotypes;
-    tsk_size_t derived_count;
-} site_t;
-
-typedef struct {
-    tsk_id_t *start;
-    tsk_id_t *end;
-    size_t num_segments;
-    double position;
-} site_state_t;
-
-typedef struct _site_list_t {
-    tsk_id_t site;
-    struct _site_list_t *next;
-} site_list_t;
-
-typedef struct {
-    uint8_t *encoded_genotypes;
-    size_t encoded_genotypes_size;
-    size_t num_sites;
-    site_list_t *sites;
-} pattern_map_t;
-
-typedef struct {
-    double time;
-    size_t num_focal_sites;
-    tsk_id_t *focal_sites;
-} ancestor_descriptor_t;
-
-/* Maps all ancestors with a specific time to their genotype patterns  */
-typedef struct {
-    double time;
-    avl_tree_t pattern_map;
-} time_map_t;
-
-typedef struct {
-    size_t num_sites;
-    size_t max_sites;
-    size_t num_samples;
-    size_t num_ancestors;
-    int flags;
-    site_t *sites;
-    avl_tree_t time_map;
-    /* Thread-safe block allocators for bulk allocations */
-    tsi_blkalloc_t main_allocator;
-    tsi_blkalloc_t indexing_allocator;
-    ancestor_descriptor_t *descriptors;
-    size_t encoded_genotypes_size;
-    size_t decoded_genotypes_size;
-    uint8_t *genotype_encode_buffer;
-    /* Optional file-descriptor for the file to be used as the mmap memory
-     * store for encoded genotypes */
-    int mmap_fd;
-    void *mmap_buffer;
-    size_t mmap_offset;
-    size_t mmap_size;
-} ancestor_builder_t;
 
 typedef struct _mutation_list_node_t {
     tsk_id_t node;
@@ -217,18 +148,6 @@ typedef struct {
     size_t traceback_realloc_size;
 } ancestor_matcher_t;
 
-int ancestor_builder_alloc(ancestor_builder_t *self, size_t num_samples,
-    size_t num_sites, int mmap_fd, int flags);
-int ancestor_builder_free(ancestor_builder_t *self);
-int ancestor_builder_print_state(ancestor_builder_t *self, FILE *out);
-int ancestor_builder_add_site(
-    ancestor_builder_t *self, double time, allele_t *genotypes);
-int ancestor_builder_finalise(ancestor_builder_t *self);
-int ancestor_builder_make_ancestor(const ancestor_builder_t *self,
-    size_t num_focal_sites, const tsk_id_t *focal_sites, tsk_id_t *start, tsk_id_t *end,
-    allele_t *haplotype);
-size_t ancestor_builder_get_memsize(const ancestor_builder_t *self);
-
 int matcher_indexes_alloc(matcher_indexes_t *self, const tsk_table_collection_t *tables,
     const tsk_size_t *num_alleles, tsk_flags_t options);
 int matcher_indexes_print_state(const matcher_indexes_t *self, FILE *out);
@@ -244,9 +163,6 @@ int ancestor_matcher_find_path(ancestor_matcher_t *self, tsk_id_t start, tsk_id_
 int ancestor_matcher_print_state(ancestor_matcher_t *self, FILE *out);
 double ancestor_matcher_get_mean_traceback_size(ancestor_matcher_t *self);
 size_t ancestor_matcher_get_total_memory(ancestor_matcher_t *self);
-
-int packbits(const allele_t *restrict source, size_t len, uint8_t *restrict dest);
-void unpackbits(const uint8_t *restrict source, size_t len, allele_t *restrict dest);
 
 #define tsi_safe_free(pointer)                                                          \
     do {                                                                                \

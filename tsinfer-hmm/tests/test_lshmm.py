@@ -10,11 +10,10 @@ import pickle
 import msprime
 import numpy as np
 import pytest
-import test_matcher_fixtures
 import tskit
 
-import _tsinfer
-from tsinfer import arg_ops, matching
+import _tsinfer_hmm
+from tsinfer_hmm import arg_ops, matching
 
 
 @dataclasses.dataclass
@@ -238,15 +237,15 @@ class AncestorMatcher:
 
         if max_L == 0:
             if mu == 0:
-                raise _tsinfer.MatchImpossible(
+                raise _tsinfer_hmm.MatchImpossible(
                     "Trying to match non-existent allele with zero mismatch rate"
                 )
             elif mu == 1:
-                raise _tsinfer.MatchImpossible(
+                raise _tsinfer_hmm.MatchImpossible(
                     "Match impossible: mismatch prob=1 & no haplotype with other allele"
                 )
             elif rho == 0:
-                raise _tsinfer.MatchImpossible(
+                raise _tsinfer_hmm.MatchImpossible(
                     "Matching failed with recombination=0, potentially due to "
                     "rounding issues. Try increasing the precision value"
                 )
@@ -936,93 +935,3 @@ class TestSimulationExamples:
         assert ts.num_trees > 1
         ts = add_unique_sample_mutations(ts)
         self.check_switch_all_samples(ts)
-
-
-# ---------------------------------------------------------------------------
-# tsinfer-topology fixtures (from test_matcher_fixtures)
-# ---------------------------------------------------------------------------
-
-
-class TestStarTreeFixture:
-    """Run Python and C matchers on star topology."""
-
-    @staticmethod
-    def ts():
-        ts, _, _ = test_matcher_fixtures._star_ts()
-        return ts
-
-    def test_copy_node2(self):
-        run_match_tsinfer(self.ts(), np.array([0, 1, 0]))
-
-    def test_copy_node3(self):
-        run_match_tsinfer(self.ts(), np.array([1, 0, 0]))
-
-    def test_mixed(self):
-        run_match_tsinfer(self.ts(), np.array([1, 1, 0]))
-
-    def test_ancestral(self):
-        run_match_tsinfer(self.ts(), np.array([0, 0, 0]))
-
-
-class TestBinaryTreeFixture:
-    """Run Python and C matchers on binary topology."""
-
-    @staticmethod
-    def ts():
-        ts, _, _ = test_matcher_fixtures._binary_ts()
-        return ts
-
-    def test_copy_leaf_node3(self):
-        run_match_tsinfer(self.ts(), np.array([1, 0, 1, 0]))
-
-    def test_copy_leaf_node4(self):
-        run_match_tsinfer(self.ts(), np.array([1, 0, 0, 1]))
-
-    def test_copy_internal(self):
-        run_match_tsinfer(self.ts(), np.array([1, 0, 0, 0]))
-
-    def test_mixed_leaves(self):
-        run_match_tsinfer(self.ts(), np.array([0, 0, 1, 1]))
-
-
-class TestTwoTreeFixture:
-    """Run Python and C matchers on two-tree topology."""
-
-    @staticmethod
-    def ts():
-        ts, _, _ = test_matcher_fixtures._two_tree_ts()
-        return ts
-
-    def test_copy_A(self):
-        run_match_tsinfer(self.ts(), np.array([1, 0, 0, 0]))
-
-    def test_copy_B(self):
-        run_match_tsinfer(self.ts(), np.array([0, 0, 1, 0]))
-
-    def test_recombination(self):
-        run_match_tsinfer(self.ts(), np.array([1, 0, 1, 0]))
-
-    def test_partial_missing(self):
-        run_match_tsinfer(self.ts(), np.array([-1, -1, 1, 0]))
-
-
-class TestDeepChainFixture:
-    """Run Python and C matchers on chain topology."""
-
-    @staticmethod
-    def ts():
-        ts, _, _ = test_matcher_fixtures._deep_chain_ts()
-        return ts
-
-    def test_copy_C(self):
-        run_match_tsinfer(self.ts(), np.array([1, 1, 1, 0]))
-
-    def test_copy_B(self):
-        run_match_tsinfer(self.ts(), np.array([1, 1, 0, 0]))
-
-    def test_copy_A(self):
-        run_match_tsinfer(self.ts(), np.array([1, 0, 0, 0]))
-
-    @pytest.mark.xfail(reason="Novel allele with mismatch=0 raises MatchImpossible")
-    def test_novel_haplotype(self):
-        run_match_tsinfer(self.ts(), np.array([0, 0, 0, 1]))
