@@ -220,3 +220,7 @@ __marimo__/
 
 # Meson
 .wraplock
+
+# Benchmarking data and results
+benchmarking/data/
+benchmarking/results/
