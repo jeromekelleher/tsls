@@ -269,8 +269,12 @@ AncestorMatcher_init(AncestorMatcher *self, PyObject *args, PyObject *kwds)
     int err;
     int extended_checks = 0;
     int weight_by_n = 1;
+    int pruning_mode = TSLS_PRUNE_NONE;
+    double pruning_parameter = 0;
+    int count_distinct = 0;
     static char *kwlist[] = { "matcher_indexes", "recombination", "mismatch",
-        "extended_checks", "likelihood_threshold", "weight_by_n", NULL };
+        "extended_checks", "likelihood_threshold", "weight_by_n", "pruning_mode",
+        "pruning_parameter", "count_distinct", NULL };
     MatcherIndexes *matcher_indexes = NULL;
     PyObject *recombination = NULL;
     PyObject *mismatch = NULL;
@@ -282,9 +286,10 @@ AncestorMatcher_init(AncestorMatcher *self, PyObject *args, PyObject *kwds)
 
     self->ancestor_matcher = NULL;
     self->matcher_indexes = NULL;
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O!OO|idi", kwlist, &MatcherIndexesType,
-            &matcher_indexes, &recombination, &mismatch, &extended_checks,
-            &likelihood_threshold, &weight_by_n)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O!OO|idiidi", kwlist,
+            &MatcherIndexesType, &matcher_indexes, &recombination, &mismatch,
+            &extended_checks, &likelihood_threshold, &weight_by_n, &pruning_mode,
+            &pruning_parameter, &count_distinct)) {
         goto out;
     }
     self->matcher_indexes = matcher_indexes;
@@ -326,9 +331,18 @@ AncestorMatcher_init(AncestorMatcher *self, PyObject *args, PyObject *kwds)
     if (!weight_by_n) {
         flags |= TSLS_DISABLE_WEIGHT_BY_N;
     }
+    if (count_distinct) {
+        flags |= TSLS_COUNT_DISTINCT;
+    }
     err = ancestor_matcher_alloc(self->ancestor_matcher,
         self->matcher_indexes->matcher_indexes, PyArray_DATA(recombination_array),
         PyArray_DATA(mismatch_array), likelihood_threshold, flags);
+    if (err != 0) {
+        handle_library_error(err);
+        goto out;
+    }
+    err = ancestor_matcher_set_pruning(
+        self->ancestor_matcher, pruning_mode, pruning_parameter);
     if (err != 0) {
         handle_library_error(err);
         goto out;
@@ -633,6 +647,20 @@ out:
 }
 
 static PyObject *
+AncestorMatcher_get_mean_num_distinct_values(AncestorMatcher *self, void *closure)
+{
+    PyObject *ret = NULL;
+
+    if (AncestorMatcher_check_state(self) != 0) {
+        goto out;
+    }
+    ret = Py_BuildValue(
+        "d", ancestor_matcher_get_mean_num_distinct_values(self->ancestor_matcher));
+out:
+    return ret;
+}
+
+static PyObject *
 AncestorMatcher_get_total_memory(AncestorMatcher *self, void *closure)
 {
     PyObject *ret = NULL;
@@ -657,6 +685,10 @@ out:
 static PyGetSetDef AncestorMatcher_getsetters[] = {
     { "mean_traceback_size", (getter) AncestorMatcher_get_mean_traceback_size, NULL,
         "The mean size of the traceback per site." },
+    { "mean_num_distinct_values",
+        (getter) AncestorMatcher_get_mean_num_distinct_values, NULL,
+        "The mean number of distinct likelihood values per site in the last "
+        "Viterbi run (if count_distinct is set)." },
     { "total_memory", (getter) AncestorMatcher_get_total_memory, NULL,
         "The total amount of memory used by this matcher." },
     { NULL } /* Sentinel */

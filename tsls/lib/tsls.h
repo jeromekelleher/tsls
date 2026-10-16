@@ -36,6 +36,15 @@
 /* Matcher flags */
 #define TSLS_EXTENDED_CHECKS     (1 << 0)
 #define TSLS_DISABLE_WEIGHT_BY_N (1 << 1)
+#define TSLS_COUNT_DISTINCT      (1 << 2)
+
+/* Experimental pruning modes. After normalisation at each site, pruned
+ * nodes are given the value likelihood_threshold. */
+#define TSLS_PRUNE_NONE     0
+/* Prune nodes with likelihood < parameter * max likelihood */
+#define TSLS_PRUNE_RELATIVE 1
+/* Prune all but the parameter nodes with the largest likelihoods */
+#define TSLS_PRUNE_TOP_N    2
 
 typedef int8_t allele_t;
 typedef tsk_id_t coordinate_t;
@@ -118,6 +127,8 @@ typedef struct {
     size_t num_sites;
     /* Input LS model rates */
     double likelihood_threshold;
+    int pruning_mode;
+    double pruning_parameter;
     double *recombination_rate;
     double *mismatch_rate;
     /* The quintuply linked tree */
@@ -145,6 +156,11 @@ typedef struct {
     node_state_list_t *traceback;
     tsi_blkalloc_t traceback_allocator;
     size_t total_traceback_size;
+    /* The total number of distinct likelihood values over sites, if
+     * TSLS_COUNT_DISTINCT is set. */
+    size_t total_distinct_values;
+    /* Scratch buffer for values */
+    double *values_tmp;
     size_t traceback_block_size;
     size_t traceback_realloc_size;
 } ancestor_matcher_t;
@@ -163,6 +179,7 @@ size_t compressed_matrix_get_total_values(const compressed_matrix_t *self);
 int ancestor_matcher_alloc(ancestor_matcher_t *self,
     const matcher_indexes_t *matcher_indexes, const double *recombination_rate,
     const double *mismatch_rate, double likelihood_threshold, int flags);
+int ancestor_matcher_set_pruning(ancestor_matcher_t *self, int mode, double parameter);
 int ancestor_matcher_free(ancestor_matcher_t *self);
 int ancestor_matcher_find_path(ancestor_matcher_t *self, tsk_id_t start, tsk_id_t end,
     const allele_t *haplotype, allele_t *matched_haplotype, size_t *path_length,
@@ -173,6 +190,7 @@ int ancestor_matcher_backward(ancestor_matcher_t *self, const allele_t *haplotyp
     const double *forward_normalisation_factor, compressed_matrix_t *output);
 int ancestor_matcher_print_state(ancestor_matcher_t *self, FILE *out);
 double ancestor_matcher_get_mean_traceback_size(ancestor_matcher_t *self);
+double ancestor_matcher_get_mean_num_distinct_values(ancestor_matcher_t *self);
 size_t ancestor_matcher_get_total_memory(ancestor_matcher_t *self);
 
 #define tsi_safe_free(pointer)                                                          \

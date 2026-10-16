@@ -572,3 +572,95 @@ class TestInterface:
         assert len(nodes) == len(values) > 0
         D = fm.decode([0, 6])
         assert D.shape == (ts.num_sites, 2)
+
+
+class TestPruning:
+    def run_all(self, ts, h, **kwargs):
+        m = ts.num_sites
+        mi = tsls.MatcherIndexes(ts, alleles=ALLELES)
+        am = tsls.AncestorMatcher(
+            mi, np.full(m, 0.05), np.full(m, 0.02), extended_checks=True, **kwargs
+        )
+        match = np.zeros(m, dtype=np.int8)
+        path = am.find_path(h, 0, m, match)
+        fm = am.forward_matrix(h)
+        bm = am.backward_matrix(h, fm.normalisation_factor)
+        return am, path, match, fm.decode(), bm.decode()
+
+    @pytest.mark.parametrize("name", list(EXAMPLES))
+    @pytest.mark.parametrize("pruning", [("relative", 0), ("top_n", 1000)])
+    def test_weak_pruning_is_exact(self, name, pruning):
+        ts = EXAMPLES[name]()
+        A, present, _ = dense.node_states(ts, ALLELES)
+        for h in queries(ts, A, present):
+            _, path1, match1, F1, B1 = self.run_all(ts, h)
+            _, path2, match2, F2, B2 = self.run_all(ts, h, pruning=pruning)
+            for x, y in zip(path1, path2):
+                np.testing.assert_array_equal(x, y)
+            np.testing.assert_array_equal(match1, match2)
+            np.testing.assert_array_equal(F1, F2)
+            np.testing.assert_array_equal(B1, B2)
+
+    @pytest.mark.parametrize("pruning", [("relative", 0.5), ("top_n", 1)])
+    def test_strong_pruning_reduces_traceback(self, pruning):
+        ts = two_tree_ts()
+        A, present, _ = dense.node_states(ts, ALLELES)
+        h = queries(ts, A, present)[-2]
+        am1, *_ = self.run_all(ts, h)
+        size1 = am1.mean_traceback_size
+        am2, *_ = self.run_all(ts, h, pruning=pruning)
+        assert am2.mean_traceback_size < size1
+
+    @pytest.mark.parametrize("name", list(EXAMPLES))
+    @pytest.mark.parametrize("weight_by_n", [True, False])
+    def test_lossless_floor(self, name, weight_by_n):
+        # Values below t = (rho / n) / (1 - rho + rho / n) are beaten by
+        # recombination at the next site, so flooring at t does not change
+        # the Viterbi likelihood.
+        ts = EXAMPLES[name]()
+        A, present, continuous = dense.node_states(ts, ALLELES)
+        rho, mu = 0.05, 0.02
+        n = ts.num_nodes if weight_by_n else 1
+        threshold = (rho / n) / (1 - rho + rho / n)
+        m = ts.num_sites
+        am, _ = make_matcher(
+            ts, rho, mu, weight_by_n, likelihood_threshold=threshold * (1 - 1e-12)
+        )
+        rho_a = np.full(m, rho)
+        mu_a = np.full(m, mu)
+        for h in queries(ts, A, present):
+            match = np.zeros(m, dtype=np.int8)
+            path = path_by_site(ts, *am.find_path(h, 0, m, match))
+            value = dense.path_log_likelihood(
+                A, present, continuous, h, rho_a, mu_a, len(ALLELES), n, path
+            )
+            optimum = dense.viterbi_log_likelihood(
+                A, present, continuous, h, rho_a, mu_a, len(ALLELES), n
+            )
+            assert value == pytest.approx(optimum, rel=1e-9)
+
+    def test_count_distinct(self):
+        ts = two_tree_ts()
+        A, present, _ = dense.node_states(ts, ALLELES)
+        h = queries(ts, A, present)[-2]
+        am, *_ = self.run_all(ts, h, count_distinct=True)
+        assert 0 < am.mean_num_distinct_values <= am.mean_traceback_size
+        am, *_ = self.run_all(ts, h)
+        assert am.mean_num_distinct_values == 0
+
+    @pytest.mark.parametrize(
+        "pruning", [("relative", 2), ("relative", -1), ("top_n", 0), ("top_n", 0.5)]
+    )
+    def test_bad_pruning(self, pruning):
+        ts = single_tree_ts()
+        mi = tsls.MatcherIndexes(ts, alleles=ALLELES)
+        m = ts.num_sites
+        with pytest.raises(tsls.LibraryError, match="pruning"):
+            tsls.AncestorMatcher(mi, np.zeros(m), np.zeros(m), pruning=pruning)
+
+    def test_unknown_pruning_mode(self):
+        ts = single_tree_ts()
+        mi = tsls.MatcherIndexes(ts, alleles=ALLELES)
+        m = ts.num_sites
+        with pytest.raises(ValueError, match="Unknown pruning"):
+            tsls.AncestorMatcher(mi, np.zeros(m), np.zeros(m), pruning=("x", 1))

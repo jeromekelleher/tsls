@@ -142,7 +142,17 @@ class AncestorMatcher(_tsls.AncestorMatcher):
     Runs the Viterbi, forward and backward algorithms for haplotypes against
     the tree sequence in the specified MatcherIndexes, using the specified
     per-site recombination and mismatch probabilities.
+
+    After normalisation at each site, values below likelihood_threshold are
+    set to it. The experimental ``pruning`` option also sets the values of
+    some nodes to likelihood_threshold: either ``("relative", f)``, for
+    nodes with values less than f times the maximum, or ``("top_n", n)``,
+    for all but the n nodes with the largest values. If ``count_distinct``
+    is True, the mean number of distinct values per site in Viterbi is
+    recorded in ``mean_num_distinct_values``.
     """
+
+    PRUNING_MODES = {"relative": 1, "top_n": 2}
 
     def __init__(
         self,
@@ -153,8 +163,16 @@ class AncestorMatcher(_tsls.AncestorMatcher):
         likelihood_threshold=None,
         weight_by_n=None,
         extended_checks=False,
+        pruning=None,
+        count_distinct=False,
     ):
-        kwargs = {"extended_checks": extended_checks}
+        kwargs = {"extended_checks": extended_checks, "count_distinct": count_distinct}
+        if pruning is not None:
+            mode, parameter = pruning
+            if mode not in self.PRUNING_MODES:
+                raise ValueError(f"Unknown pruning mode {mode!r}")
+            kwargs["pruning_mode"] = self.PRUNING_MODES[mode]
+            kwargs["pruning_parameter"] = parameter
         if likelihood_threshold is not None:
             kwargs["likelihood_threshold"] = likelihood_threshold
         if weight_by_n is not None:

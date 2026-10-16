@@ -137,15 +137,28 @@ def n_weighted_rho(rho, n):
     return rho / (rho + (1 - rho) / n)
 
 
-def make_matcher(ts, mu, rho, *, weight_by_n=True, likelihood_threshold=None):
+def make_matcher(
+    ts,
+    mu,
+    rho,
+    *,
+    weight_by_n=True,
+    likelihood_threshold=None,
+    pruning=None,
+    count_distinct=False,
+    matcher_indexes=None,
+):
     m = ts.num_sites
-    mi = tsls.MatcherIndexes(ts, alleles=ALLELES)
+    if matcher_indexes is None:
+        matcher_indexes = tsls.MatcherIndexes(ts, alleles=ALLELES)
     return tsls.AncestorMatcher(
-        mi,
+        matcher_indexes,
         np.full(m, rho),
         np.full(m, mu),
         weight_by_n=weight_by_n,
         likelihood_threshold=likelihood_threshold,
+        pruning=pruning,
+        count_distinct=count_distinct,
     )
 
 
