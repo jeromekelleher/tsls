@@ -106,23 +106,34 @@ class CompressedMatrix:
         """
         Return the dense (num_sites, len(nodes)) array of values for the
         specified nodes (default: all nodes). Nodes that are not in the tree
-        at a site have value 0. This is intended for small examples.
+        at a site have value 0.
         """
+        N = self.ts.num_nodes
         if nodes is None:
-            nodes = np.arange(self.ts.num_nodes)
+            nodes = np.arange(N)
         nodes = np.asarray(nodes, dtype=np.int32)
         D = np.zeros((self.num_sites, len(nodes)))
         for tree in self.ts.trees():
+            # The parent array has an extra entry for the virtual root, which
+            # is the parent of the roots (index -1) and never has a value.
+            parent = tree.parent_array
+            in_tree = (parent[:N] != -1) | (tree.num_children_array[:N] > 0)
             for site in tree.sites():
                 site_nodes, site_values = self.get_site(site.id)
-                value = dict(zip(site_nodes.tolist(), site_values.tolist()))
-                for j, u in enumerate(nodes.tolist()):
-                    if tree.parent(u) == -1 and tree.num_children(u) == 0:
-                        continue
-                    v = u
-                    while v not in value:
-                        v = tree.parent(v)
-                    D[site.id, j] = value[v]
+                value = np.full(N + 1, np.nan)
+                value[site_nodes] = site_values
+                # Each node takes the value of its nearest ancestor with a
+                # value: at each step, copy values from the ancestor and move
+                # up a level, so this takes as many steps as the tree is deep.
+                ancestor = parent.copy()
+                unset = np.where(in_tree & np.isnan(value[:N]))[0]
+                while len(unset) > 0:
+                    if np.any(ancestor[unset] == -1):
+                        raise ValueError("Node in tree with no stored ancestor")
+                    value[unset] = value[ancestor[unset]]
+                    ancestor[unset] = parent[ancestor[unset]]
+                    unset = unset[np.isnan(value[unset])]
+                D[site.id] = np.where(in_tree[nodes], value[nodes], 0)
         return D
 
 

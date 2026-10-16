@@ -25,7 +25,9 @@ submodule, so clone with `--recurse-submodules` or run
 module `_tsls`). It is based on the tsinfer engine:
 
 - It copies from every node in the tree at a given position (any node
-  with a parent or a child); isolated nodes cannot be copied.
+  with a parent or a child); isolated nodes cannot be copied. Copying a
+  node from one site to the next without a recombination requires it to
+  be in the tree over the whole interval between them.
 - It supports arbitrary topologies (multiple roots, no special root node).
 - It provides the Viterbi algorithm (`AncestorMatcher.find_path`, with
   the same interface as tsinfer-hmm) and the forward and backward
@@ -39,7 +41,8 @@ Paths match tsinfer-hmm except for ties. To match tsinfer's convention
 that its ultimate root node 0 is never copied, remove node 0's edges
 before building the `MatcherIndexes`; sc2ts ARGs already have an
 isolated node 0. The `benchmarking/` directory compares the engines on
-the sc2ts ARG.
+the sc2ts ARG, and `verification/` runs statistical validations of tsls on
+simulated ARGs (plots, not pass/fail tests).
 
 The git history records exactly what was copied from where. Each
 directory was first added verbatim, then changed in separate commits to

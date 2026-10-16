@@ -20,7 +20,9 @@
  *
  * When a node enters the tree it gets the value 0, and so it can only be
  * reached by recombination. When a node leaves the tree, the probability
- * of continuing from it is only the probability of recombination.
+ * of continuing from it is only the probability of recombination. So a node
+ * can only be copied from one site to the next without recombination if it
+ * is in the tree over the whole interval between them.
  */
 
 #include "tsls.h"
