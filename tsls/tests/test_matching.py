@@ -1,0 +1,493 @@
+"""
+Tests for the tsls HMM engine on small hand-built examples, compared with
+the dense implementation in dense.py.
+"""
+
+import numpy as np
+import pytest
+import tskit
+
+import dense
+import tsls
+
+ACGT = ["A", "C", "G", "T"]
+
+
+def finalise(tables):
+    tables.sort()
+    tables.build_index()
+    tables.compute_mutation_parents()
+    return tables.tree_sequence()
+
+
+def add_mutations(tables, mutations):
+    """
+    Add sites and mutations from a list of (position, ancestral_state,
+    [(node, derived_state), ...]) tuples, with mutations on the same node
+    listed oldest first.
+    """
+    for position, ancestral_state, site_mutations in mutations:
+        site = tables.sites.add_row(position=position, ancestral_state=ancestral_state)
+        for node, derived_state in site_mutations:
+            tables.mutations.add_row(site=site, node=node, derived_state=derived_state)
+
+
+def single_tree_ts():
+    # 2.00┊    6    ┊
+    #     ┊  ┏━┻━┓  ┊
+    # 1.00┊  4   5  ┊
+    #     ┊ ┏┻┓ ┏┻┓ ┊
+    # 0.00┊ 0 1 2 3 ┊
+    #     0         8
+    tables = tskit.Tree.generate_balanced(4, span=8).tree_sequence.dump_tables()
+    add_mutations(
+        tables,
+        [
+            # Recurrent mutations and a non-zero ancestral state
+            (1, "G", [(0, "T"), (3, "T")]),
+            # A back mutation
+            (3, "A", [(4, "C"), (1, "A")]),
+            # Three different derived states
+            (5, "T", [(0, "A"), (2, "C"), (3, "G")]),
+            # Stacked mutations on the same node, and one on the root
+            (7, "C", [(6, "G"), (2, "A"), (2, "T")]),
+        ],
+    )
+    return finalise(tables)
+
+
+def two_tree_ts():
+    # Node 4 is only in the left tree and node 7 only in the right tree.
+    #
+    # 3.00┊     6   ┊    6    ┊
+    #     ┊   ┏━┻┓  ┊   ┏┻━┓  ┊
+    # 2.00┊   5  ┃  ┊   5  ┃  ┊
+    #     ┊  ┏┻┓ ┃  ┊ ┏━┻┓ ┃  ┊
+    # 1.50┊  ┃ ┃ ┃  ┊ ┃  7 ┃  ┊
+    #     ┊  ┃ ┃ ┃  ┊ ┃ ┏┻┓┃  ┊
+    # 1.00┊  4 ┃ ┃  ┊ ┃ ┃ ┃┃  ┊
+    #     ┊ ┏┻┓┃ ┃  ┊ ┃ ┃ ┃┃  ┊
+    # 0.00┊ 0 1 2 3 ┊ 0 1 2 3 ┊
+    #     0        10        20
+    tables = tskit.TableCollection(sequence_length=20)
+    for t in [0, 0, 0, 0, 1, 2, 3, 1.5]:
+        tables.nodes.add_row(flags=tskit.NODE_IS_SAMPLE if t == 0 else 0, time=t)
+    for left, right, parent, child in [
+        (0, 10, 4, 0),
+        (0, 10, 4, 1),
+        (0, 10, 5, 4),
+        (0, 10, 5, 2),
+        (0, 20, 6, 5),
+        (0, 20, 6, 3),
+        (10, 20, 7, 1),
+        (10, 20, 7, 2),
+        (10, 20, 5, 0),
+        (10, 20, 5, 7),
+    ]:
+        tables.edges.add_row(left, right, parent, child)
+    add_mutations(
+        tables,
+        [
+            (2, "A", [(4, "C")]),
+            (5, "A", [(0, "G"), (2, "T")]),
+            (8, "A", [(5, "C"), (1, "A")]),
+            (12, "T", [(7, "G")]),
+            (15, "C", [(0, "T"), (3, "T")]),
+            (18, "G", [(6, "C")]),
+        ],
+    )
+    return finalise(tables)
+
+
+def forest_ts():
+    # Two roots on [0, 5), joined by node 6 on [5, 10). Node 4 is a unary
+    # root on [0, 5), node 5 is isolated, and node 6 is only in the right
+    # tree.
+    #
+    # 3.00┊         ┊    6    ┊
+    #     ┊         ┊  ┏━┻━┓  ┊
+    # 2.00┊       4 ┊  ┃   4  ┊
+    #     ┊       ┃ ┊  ┃   ┃  ┊
+    # 1.00┊   3   ┃ ┊  3   ┃  ┊
+    #     ┊  ┏┻┓  ┃ ┊ ┏┻┓  ┃  ┊
+    # 0.00┊  0 1  2 ┊ 0 1  2  ┊
+    #     0         5        10
+    tables = tskit.TableCollection(sequence_length=10)
+    for t in [0, 0, 0, 1, 2, 4, 3]:
+        tables.nodes.add_row(flags=tskit.NODE_IS_SAMPLE if t == 0 else 0, time=t)
+    for left, right, parent, child in [
+        (0, 10, 3, 0),
+        (0, 10, 3, 1),
+        (0, 10, 4, 2),
+        (5, 10, 6, 3),
+        (5, 10, 6, 4),
+    ]:
+        tables.edges.add_row(left, right, parent, child)
+    add_mutations(
+        tables,
+        [
+            (1, "A", [(3, "C"), (2, "G")]),
+            (3, "C", [(4, "A")]),
+            (4, "T", []),
+            (6, "G", [(0, "A"), (4, "T")]),
+            (8, "A", [(6, "T"), (1, "A")]),
+        ],
+    )
+    return finalise(tables)
+
+
+def isolated_root_ts():
+    # The sc2ts convention: node 0 is an isolated vestigial root above the
+    # root node 1 (in tsinfer, node 0 is joined to node 1 by an edge, which
+    # is removed before matching). Nodes 1, 2 and 4 are internal samples.
+    #
+    # 3.00┊    1    ┊    1    ┊
+    #     ┊  ┏━┻━┓  ┊  ┏━╋━┓  ┊
+    # 2.00┊  2   ┃  ┊  2 ┃ ┃  ┊
+    #     ┊ ┏┻┓  ┃  ┊  ┃ ┃ ┃  ┊
+    # 1.00┊ 3 4  ┃  ┊  3 4 ┃  ┊
+    #     ┊   ┃  ┃  ┊    ┃ ┃  ┊
+    # 0.00┊   5  6  ┊    5 6  ┊
+    #     0         6        12
+    tables = tskit.TableCollection(sequence_length=12)
+    flags = tskit.NODE_IS_SAMPLE
+    for f, t in [(0, 4), (flags, 3), (flags, 2), (flags, 1), (flags, 1)]:
+        tables.nodes.add_row(flags=f, time=t)
+    tables.nodes.add_row(flags=flags, time=0)
+    tables.nodes.add_row(flags=flags, time=0)
+    for left, right, parent, child in [
+        (0, 12, 1, 2),
+        (0, 12, 1, 6),
+        (0, 12, 2, 3),
+        (0, 6, 2, 4),
+        (6, 12, 1, 4),
+        (0, 12, 4, 5),
+    ]:
+        tables.edges.add_row(left, right, parent, child)
+    add_mutations(
+        tables,
+        [
+            (1, "A", [(2, "C")]),
+            (3, "G", [(4, "T"), (6, "T")]),
+            (5, "C", [(3, "A")]),
+            (7, "T", [(5, "G")]),
+            (9, "A", [(4, "-")]),
+            (11, "C", [(1, "G"), (6, "C")]),
+        ],
+    )
+    return finalise(tables)
+
+
+EXAMPLES = {
+    "single_tree": single_tree_ts,
+    "two_trees": two_tree_ts,
+    "forest": forest_ts,
+    "isolated_root": isolated_root_ts,
+}
+ALLELES = ACGT + ["-"]
+PARAMS = [(1e-2, 1e-2), (0.2, 0.05), (1e-4, 1e-3)]
+
+
+def queries(ts, A, present):
+    """
+    Return a list of query haplotypes: the haplotypes of all nodes that are
+    in every tree, plus some random haplotypes, with and without missing
+    data.
+    """
+    rng = np.random.default_rng(42)
+    H = [A[:, u] for u in range(ts.num_nodes) if np.all(present[:, u])]
+    num_alleles = len(ALLELES)
+    for _ in range(3):
+        H.append(rng.integers(0, num_alleles, size=ts.num_sites).astype(np.int8))
+    for h in list(H[:3]):
+        h = h.copy()
+        h[rng.integers(0, ts.num_sites)] = -1
+        H.append(h)
+    h = H[0].copy()
+    h[0] = -1
+    h[-1] = -1
+    H.append(h)
+    return [np.asarray(h, dtype=np.int8) for h in H]
+
+
+def make_matcher(ts, rho, mu, weight_by_n, likelihood_threshold=None):
+    m = ts.num_sites
+    mi = tsls.MatcherIndexes(ts, alleles=ALLELES)
+    am = tsls.AncestorMatcher(
+        mi,
+        np.full(m, rho),
+        np.full(m, mu),
+        weight_by_n=weight_by_n,
+        likelihood_threshold=likelihood_threshold,
+        extended_checks=True,
+    )
+    n = ts.num_nodes if weight_by_n else 1
+    return am, n
+
+
+def path_by_site(ts, left, right, parent):
+    """
+    Return the node copied at each site, from a path in any order.
+    """
+    index = np.argsort(left)
+    left, right, parent = left[index], right[index], parent[index]
+    assert left[0] == 0
+    assert right[-1] == ts.sequence_length
+    np.testing.assert_array_equal(left[1:], right[:-1])
+    segment = np.searchsorted(left, ts.sites_position, side="right") - 1
+    return parent[segment]
+
+
+@pytest.fixture(scope="module", params=list(EXAMPLES))
+def example(request):
+    ts = EXAMPLES[request.param]()
+    A, present = dense.node_states(ts, ALLELES)
+    return ts, A, present
+
+
+class TestExamples:
+    def test_node_states(self, example):
+        ts, A, present = example
+        G = ts.genotype_matrix(isolated_as_missing=False, alleles=tuple(ALLELES))
+        np.testing.assert_array_equal(A[:, ts.samples()], G)
+        assert np.any(np.bincount(ts.mutations_site) > 1)
+
+
+@pytest.mark.parametrize("weight_by_n", [True, False])
+@pytest.mark.parametrize(("rho", "mu"), PARAMS)
+class TestAgainstDense:
+    def test_viterbi(self, example, weight_by_n, rho, mu):
+        ts, A, present = example
+        am, n = make_matcher(ts, rho, mu, weight_by_n)
+        m = ts.num_sites
+        rho_a = np.full(m, rho)
+        mu_a = np.full(m, mu)
+        for h in queries(ts, A, present):
+            match = np.zeros(m, dtype=np.int8)
+            left, right, parent = am.find_path(h, 0, m, match)
+            path = path_by_site(ts, left, right, parent)
+            np.testing.assert_array_equal(match, A[np.arange(m), path])
+            assert np.all(present[np.arange(m), path])
+            value = dense.path_log_likelihood(
+                A, present, h, rho_a, mu_a, len(ALLELES), n, path
+            )
+            optimum = dense.viterbi_log_likelihood(
+                A, present, h, rho_a, mu_a, len(ALLELES), n
+            )
+            assert value == pytest.approx(optimum, rel=1e-9)
+
+    def test_forward_backward(self, example, weight_by_n, rho, mu):
+        ts, A, present = example
+        am, n = make_matcher(ts, rho, mu, weight_by_n)
+        m = ts.num_sites
+        rho_a = np.full(m, rho)
+        mu_a = np.full(m, mu)
+        for h in queries(ts, A, present):
+            fm = am.forward_matrix(h)
+            F, c = dense.forward(A, present, h, rho_a, mu_a, len(ALLELES), n)
+            np.testing.assert_allclose(fm.normalisation_factor, c, rtol=1e-12)
+            np.testing.assert_allclose(fm.decode(), F, rtol=1e-12, atol=1e-300)
+            assert fm.log_likelihood == pytest.approx(np.sum(np.log(c)))
+
+            bm = am.backward_matrix(h, fm.normalisation_factor)
+            B = dense.backward(A, present, h, rho_a, mu_a, len(ALLELES), n, c)
+            np.testing.assert_allclose(bm.decode(), B, rtol=1e-12, atol=1e-300)
+            np.testing.assert_allclose(np.sum(F * B, axis=1), 1)
+
+    def test_likelihood_threshold(self, example, weight_by_n, rho, mu):
+        ts, A, present = example
+        threshold = 1e-3
+        am, n = make_matcher(ts, rho, mu, weight_by_n, likelihood_threshold=threshold)
+        m = ts.num_sites
+        rho_a = np.full(m, rho)
+        mu_a = np.full(m, mu)
+        for h in queries(ts, A, present):
+            fm = am.forward_matrix(h)
+            F, c = dense.forward(
+                A, present, h, rho_a, mu_a, len(ALLELES), n, threshold=threshold
+            )
+            np.testing.assert_allclose(fm.decode(), F, rtol=1e-12)
+            bm = am.backward_matrix(h, fm.normalisation_factor)
+            B = dense.backward(
+                A, present, h, rho_a, mu_a, len(ALLELES), n, c, threshold=threshold
+            )
+            np.testing.assert_allclose(bm.decode(), B, rtol=1e-12)
+            match = np.zeros(m, dtype=np.int8)
+            left, right, parent = am.find_path(h, 0, m, match)
+            path = path_by_site(ts, left, right, parent)
+            np.testing.assert_array_equal(match, A[np.arange(m), path])
+
+
+class TestViterbiPaths:
+    @pytest.mark.parametrize("name", list(EXAMPLES))
+    def test_exact_copy(self, name):
+        # Each node that is in every tree and has a unique haplotype is
+        # copied exactly with no recombination.
+        ts = EXAMPLES[name]()
+        A, present = dense.node_states(ts, ALLELES)
+        am, _ = make_matcher(ts, 1e-4, 1e-3, True)
+        m = ts.num_sites
+        for u in range(ts.num_nodes):
+            h = A[:, u]
+            if not np.all(present[:, u]):
+                continue
+            num_same = np.sum(np.all(A == h[:, None], axis=0) & np.all(present, axis=0))
+            if num_same > 1:
+                continue
+            match = np.zeros(m, dtype=np.int8)
+            left, right, parent = am.find_path(h, 0, m, match)
+            assert list(parent) == [u]
+            assert list(left) == [0]
+            assert list(right) == [ts.sequence_length]
+            np.testing.assert_array_equal(match, h)
+
+    def test_two_tree_recombinant(self):
+        # Copy node 4 (only in the left tree) then node 7 (only in the right)
+        ts = two_tree_ts()
+        A, _ = dense.node_states(ts, ALLELES)
+        h = np.concatenate([A[:3, 4], A[3:, 7]])
+        am, _ = make_matcher(ts, 1e-2, 1e-3, True)
+        match = np.zeros(ts.num_sites, dtype=np.int8)
+        left, right, parent = am.find_path(h, 0, ts.num_sites, match)
+        np.testing.assert_array_equal(match, h)
+        # The path is returned right-to-left
+        assert list(parent) == [7, 4]
+        assert list(right) == [20, 12]
+        assert list(left) == [12, 0]
+
+    def test_isolated_node_never_copied(self):
+        ts = isolated_root_ts()
+        A, present = dense.node_states(ts, ALLELES)
+        assert not np.any(present[:, 0])
+        am, _ = make_matcher(ts, 0.2, 0.05, True)
+        for h in queries(ts, A, present):
+            match = np.zeros(ts.num_sites, dtype=np.int8)
+            _, _, parent = am.find_path(h, 0, ts.num_sites, match)
+            assert 0 not in parent
+
+    def test_start_end(self):
+        ts = two_tree_ts()
+        A, _ = dense.node_states(ts, ALLELES)
+        h = A[:, 0].copy()
+        h[0] = -1
+        h[-1] = -1
+        am, _ = make_matcher(ts, 1e-4, 1e-3, True)
+        match = np.zeros(ts.num_sites, dtype=np.int8)
+        left, right, parent = am.find_path(h, 1, ts.num_sites - 1, match)
+        assert list(parent) == [0]
+        assert list(left) == [ts.sites_position[1]]
+        assert list(right) == [ts.sites_position[-1]]
+        np.testing.assert_array_equal(match[1:-1], h[1:-1])
+
+
+class TestInterface:
+    def test_bad_alleles(self):
+        with pytest.raises(ValueError, match="Unknown"):
+            tsls.MatcherIndexes(single_tree_ts(), alleles=["A", "C"])
+
+    def test_default_binary_alleles(self):
+        tables = tskit.Tree.generate_balanced(2, span=4).tree_sequence.dump_tables()
+        add_mutations(tables, [(1, "0", [(0, "1")])])
+        ts = finalise(tables)
+        mi = tsls.MatcherIndexes(ts)
+        am = tsls.AncestorMatcher(mi, np.full(1, 1e-3), np.full(1, 1e-3))
+        match = np.zeros(1, dtype=np.int8)
+        _, _, parent = am.find_path(np.array([1], dtype=np.int8), 0, 1, match)
+        assert list(parent) == [0]
+
+    @pytest.mark.parametrize("state", [5, -2])
+    def test_bad_haplotype_allele(self, state):
+        ts = single_tree_ts()
+        am, _ = make_matcher(ts, 1e-2, 1e-2, True)
+        h = np.zeros(ts.num_sites, dtype=np.int8)
+        h[1] = state
+        match = np.zeros(ts.num_sites, dtype=np.int8)
+        with pytest.raises(tsls.LibraryError, match="Haplotype allele"):
+            am.find_path(h, 0, ts.num_sites, match)
+        with pytest.raises(tsls.LibraryError, match="Haplotype allele"):
+            am.forward_matrix(h)
+
+    @pytest.mark.parametrize(("start", "end"), [(0, 0), (-1, 2), (2, 1), (0, 5)])
+    def test_bad_site_range(self, start, end):
+        ts = single_tree_ts()
+        am, _ = make_matcher(ts, 1e-2, 1e-2, True)
+        h = np.zeros(ts.num_sites, dtype=np.int8)
+        match = np.zeros(ts.num_sites, dtype=np.int8)
+        with pytest.raises(tsls.LibraryError, match="site range"):
+            am.find_path(h, start, end, match)
+
+    def test_bad_lengths(self):
+        ts = single_tree_ts()
+        mi = tsls.MatcherIndexes(ts, alleles=ALLELES)
+        with pytest.raises(ValueError, match="recombination"):
+            tsls.AncestorMatcher(mi, np.zeros(1), np.zeros(ts.num_sites))
+        with pytest.raises(ValueError, match="mismatch"):
+            tsls.AncestorMatcher(mi, np.zeros(ts.num_sites), np.zeros(1))
+        am, _ = make_matcher(ts, 1e-2, 1e-2, True)
+        with pytest.raises(ValueError):
+            am.forward_matrix(np.zeros(1, dtype=np.int8))
+        h = np.zeros(ts.num_sites, dtype=np.int8)
+        with pytest.raises(ValueError, match="normalisation_factor"):
+            am.backward_matrix(h, np.ones(1))
+
+    def test_bad_normalisation_factor(self):
+        ts = single_tree_ts()
+        am, _ = make_matcher(ts, 1e-2, 1e-2, True)
+        h = np.zeros(ts.num_sites, dtype=np.int8)
+        with pytest.raises(tsls.LibraryError, match="normalisation"):
+            am.backward_matrix(h, np.zeros(ts.num_sites))
+
+    def test_match_impossible(self):
+        ts = single_tree_ts()
+        am, _ = make_matcher(ts, 0, 0, True)
+        h = np.full(ts.num_sites, 4, dtype=np.int8)
+        match = np.zeros(ts.num_sites, dtype=np.int8)
+        with pytest.raises(tsls.MatchImpossible):
+            am.find_path(h, 0, ts.num_sites, match)
+        with pytest.raises(tsls.MatchImpossible):
+            am.forward_matrix(h)
+
+    def test_non_integer_coordinates(self):
+        tables = tskit.Tree.generate_balanced(2, span=4).tree_sequence.dump_tables()
+        tables.sites.add_row(position=1.5, ancestral_state="0")
+        with pytest.raises(tsls.LibraryError, match="integers"):
+            tsls.MatcherIndexes(finalise(tables))
+
+    def test_memory_stats(self):
+        ts = two_tree_ts()
+        am, _ = make_matcher(ts, 1e-2, 1e-2, True)
+        assert am.total_memory > 0
+        h = np.zeros(ts.num_sites, dtype=np.int8)
+        match = np.zeros(ts.num_sites, dtype=np.int8)
+        am.find_path(h, 0, ts.num_sites, match)
+        assert am.mean_traceback_size > 0
+
+    def test_reuse_matcher(self):
+        # Running the algorithms repeatedly on the same matcher gives the
+        # same results.
+        ts = two_tree_ts()
+        A, present = dense.node_states(ts, ALLELES)
+        am, _ = make_matcher(ts, 0.2, 0.05, True)
+        h = queries(ts, A, present)[-1]
+        m = ts.num_sites
+        results = []
+        for _ in range(2):
+            match = np.zeros(m, dtype=np.int8)
+            path = am.find_path(h, 0, m, match)
+            fm = am.forward_matrix(h)
+            bm = am.backward_matrix(h, fm.normalisation_factor)
+            results.append((path, match, fm.decode(), bm.decode()))
+        for x, y in zip(results[0][0], results[1][0]):
+            np.testing.assert_array_equal(x, y)
+        for x, y in zip(results[0][1:], results[1][1:]):
+            np.testing.assert_array_equal(x, y)
+
+    def test_compressed_matrix(self):
+        ts = single_tree_ts()
+        am, _ = make_matcher(ts, 1e-2, 1e-2, True)
+        fm = am.forward_matrix(np.zeros(ts.num_sites, dtype=np.int8))
+        assert fm.num_sites == ts.num_sites
+        nodes, values = fm.get_site(0)
+        assert len(nodes) == len(values) > 0
+        D = fm.decode([0, 6])
+        assert D.shape == (ts.num_sites, 2)
