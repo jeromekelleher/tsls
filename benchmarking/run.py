@@ -148,7 +148,7 @@ def main(
                 continue
             before = time.perf_counter()
             options = {}
-            if name == "tsinfer":
+            if name in ("tsinfer", "tsls"):
                 options["mismatch_threshold"] = mismatch_threshold
             engine = engines.ENGINES[name](ts, mu=mu, rho=rho, **options)
             setup_time = time.perf_counter() - before

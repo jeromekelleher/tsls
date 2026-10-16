@@ -949,6 +949,25 @@ test = [
 ]
 
 [[package]]
+name = "tsls"
+version = "0.0.1.dev0"
+source = { editable = "../tsls" }
+dependencies = [
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.5.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "tskit" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "numpy", specifier = ">=2" },
+    { name = "tskit", specifier = ">=1.0.0" },
+]
+
+[package.metadata.requires-dev]
+test = [{ name = "pytest" }]
+
+[[package]]
 name = "tsls-benchmarking"
 version = "0.0.0"
 source = { virtual = "." }
@@ -961,6 +980,7 @@ dependencies = [
     { name = "tsinfer-hmm" },
     { name = "tskit" },
     { name = "tskit-hmm" },
+    { name = "tsls" },
     { name = "tszip" },
 ]
 
@@ -979,6 +999,7 @@ requires-dist = [
     { name = "tsinfer-hmm", editable = "../tsinfer-hmm" },
     { name = "tskit", specifier = ">=1.0.0" },
     { name = "tskit-hmm", editable = "../tskit-hmm" },
+    { name = "tsls", editable = "../tsls" },
     { name = "tszip" },
 ]
 

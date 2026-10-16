@@ -30,6 +30,7 @@ import _tskit_hmm
 import numpy as np
 import tsinfer_hmm
 import tskit_hmm
+import tsls
 
 ALLELES = ("A", "C", "G", "T")
 MISSING = -1
@@ -202,4 +203,55 @@ class TskitEngine:
         return float(np.sum(np.log(normalisation_factor)) + np.log(n) - m * np.log(stay))
 
 
-ENGINES = {engine.name: engine for engine in [TsinferEngine, TskitEngine]}
+class TslsEngine(TsinferEngine):
+    """
+    The merged tsls engine, with the same model and options as tsinfer. In
+    tsls every node in the tree is a state, so we remove the vestigial root
+    edge 0 -> 1 added by prepare.py to make node 0 isolated, as in sc2ts.
+    """
+
+    name = "tsls"
+
+    def __init__(self, ts, *, mu, rho, mismatch_threshold=None):
+        self.num_sites = ts.num_sites
+        self.mu = mu
+        self.rho = rho
+        self.likelihood_threshold = None
+        if mismatch_threshold is not None:
+            self.likelihood_threshold = mu**mismatch_threshold * 0.99
+        self.recombination = np.full(ts.num_sites, rho)
+        self.mismatch = np.full(ts.num_sites, mu)
+        tables = ts.dump_tables()
+        tables.edges.keep_rows(tables.edges.parent != 0)
+        self.matcher_indexes = tsls.MatcherIndexes(
+            tables.tree_sequence(), alleles=ALLELES
+        )
+
+    def match(self, h):
+        matcher = tsls.AncestorMatcher(
+            self.matcher_indexes,
+            self.recombination,
+            self.mismatch,
+            likelihood_threshold=self.likelihood_threshold,
+            weight_by_n=False,
+        )
+        matched = np.zeros(self.num_sites, dtype=np.int8)
+        left, right, parent = matcher.find_path(
+            h.astype(np.int8), 0, self.num_sites, matched
+        )
+        stats = {
+            "total_memory": matcher.total_memory,
+            "mean_traceback_size": matcher.mean_traceback_size,
+        }
+        return (
+            left[::-1].astype(np.float64),
+            right[::-1].astype(np.float64),
+            parent[::-1].copy(),
+            matched,
+            stats,
+        )
+
+
+ENGINES = {
+    engine.name: engine for engine in [TsinferEngine, TskitEngine, TslsEngine]
+}

@@ -12,6 +12,7 @@ dependencies = [
     "tszip",
     "tsinfer-hmm",
     "tskit-hmm",
+    "tsls",
 ]
 
 [dependency-groups]
@@ -26,6 +27,7 @@ package = false
 [tool.uv.sources]
 tsinfer-hmm = { path = "../tsinfer-hmm", editable = true }
 tskit-hmm = { path = "../tskit-hmm", editable = true }
+tsls = { path = "../tsls", editable = true }
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
