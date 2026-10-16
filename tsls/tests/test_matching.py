@@ -664,3 +664,79 @@ class TestPruning:
         m = ts.num_sites
         with pytest.raises(ValueError, match="Unknown pruning"):
             tsls.AncestorMatcher(mi, np.zeros(m), np.zeros(m), pruning=("x", 1))
+
+
+class TestViterbiMatrix:
+    @pytest.mark.parametrize("name", list(EXAMPLES))
+    @pytest.mark.parametrize("weight_by_n", [True, False])
+    def test_against_dense(self, name, weight_by_n):
+        ts = EXAMPLES[name]()
+        A, present, continuous = dense.node_states(ts, ALLELES)
+        rho, mu = 0.05, 0.02
+        am, n = make_matcher(ts, rho, mu, weight_by_n)
+        m = ts.num_sites
+        rho_a = np.full(m, rho)
+        mu_a = np.full(m, mu)
+        for h in queries(ts, A, present):
+            path, matched, vm = am.viterbi_matrix(h)
+            V, c = dense.viterbi_matrix(
+                A, present, continuous, h, rho_a, mu_a, len(ALLELES), n
+            )
+            np.testing.assert_allclose(vm.normalisation_factor, c, rtol=1e-12)
+            np.testing.assert_allclose(vm.decode(), V, rtol=1e-12, atol=1e-300)
+            # The same path as find_path
+            match = np.zeros(m, dtype=np.int8)
+            expected = am.find_path(h, 0, m, match)
+            for x, y in zip(path, expected):
+                np.testing.assert_array_equal(x, y)
+            np.testing.assert_array_equal(matched, match)
+
+    def test_traceback_lists(self):
+        ts = two_tree_ts()
+        A, present, _ = dense.node_states(ts, ALLELES)
+        am, _ = make_matcher(ts, 0.05, 0.02, True)
+        for h in queries(ts, A, present):
+            _, _, vm = am.viterbi_matrix(h)
+            sizes = np.diff(vm.offsets)
+            assert np.mean(sizes) == pytest.approx(am.mean_traceback_size)
+            assert len(vm.flags) == len(vm.nodes)
+            assert set(np.unique(vm.flags)) <= {0, 1}
+
+    def test_start_end(self):
+        ts = two_tree_ts()
+        A, _, _ = dense.node_states(ts, ALLELES)
+        am, _ = make_matcher(ts, 0.05, 0.02, True)
+        _, _, vm = am.viterbi_matrix(A[:, 0], 1, ts.num_sites - 1)
+        sizes = np.diff(vm.offsets)
+        assert sizes[0] == 0
+        assert sizes[-1] == 0
+        assert np.all(sizes[1:-1] > 0)
+
+    def test_forward_has_no_flags(self):
+        ts = single_tree_ts()
+        am, _ = make_matcher(ts, 0.05, 0.02, True)
+        fm = am.forward_matrix(np.zeros(ts.num_sites, dtype=np.int8))
+        assert fm.flags is None
+
+    @pytest.mark.parametrize("algorithm", ["viterbi", "forward"])
+    def test_dump_load(self, tmp_path, algorithm):
+        ts = two_tree_ts()
+        A, _, _ = dense.node_states(ts, ALLELES)
+        am, _ = make_matcher(ts, 0.05, 0.02, True)
+        h = A[:, 1]
+        if algorithm == "viterbi":
+            _, _, cm = am.viterbi_matrix(h)
+        else:
+            cm = am.forward_matrix(h)
+        path = tmp_path / "matrix.npz"
+        cm.dump(path)
+        loaded = tsls.load_compressed_matrix(path, ts)
+        for attr in ["normalisation_factor", "offsets", "nodes", "values"]:
+            np.testing.assert_array_equal(getattr(cm, attr), getattr(loaded, attr))
+        if algorithm == "viterbi":
+            np.testing.assert_array_equal(cm.flags, loaded.flags)
+        else:
+            assert loaded.flags is None
+        np.testing.assert_array_equal(cm.decode(), loaded.decode())
+        with pytest.raises(ValueError, match="does not match"):
+            tsls.load_compressed_matrix(path, single_tree_ts())

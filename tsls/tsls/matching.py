@@ -71,17 +71,41 @@ class MatcherIndexes(_tsls.MatcherIndexes):
 
 class CompressedMatrix:
     """
-    The output of the forward or backward algorithm. At each site we store a
-    list of (node, value) pairs, and the value for a node in the tree is the
-    value of its nearest ancestor (including itself) in this list.
+    The output of the Viterbi, forward or backward algorithm. At each site we
+    store a list of (node, value) pairs, and the value for a node in the tree
+    is the value of its nearest ancestor (including itself) in this list.
+
+    For Viterbi, the values are the normalised likelihoods stored in the
+    traceback at each site (before compression), the normalisation factor is
+    the maximum likelihood before normalisation, and ``flags`` gives the
+    recombination_required flag of each stored node. For forward and backward
+    ``flags`` is None.
     """
 
-    def __init__(self, ts, normalisation_factor, offsets, nodes, values):
+    def __init__(self, ts, normalisation_factor, offsets, nodes, values, flags=None):
         self.ts = ts
         self.normalisation_factor = normalisation_factor
         self.offsets = offsets
         self.nodes = nodes
         self.values = values
+        self.flags = flags
+
+    def dump(self, path):
+        """
+        Save the matrix to the specified .npz file, which can be loaded with
+        load_compressed_matrix given the same tree sequence.
+        """
+        arrays = {
+            "normalisation_factor": self.normalisation_factor,
+            "offsets": self.offsets,
+            "nodes": self.nodes,
+            "values": self.values,
+            "sites_position": self.ts.sites_position,
+            "num_nodes": np.array(self.ts.num_nodes),
+        }
+        if self.flags is not None:
+            arrays["flags"] = self.flags
+        np.savez_compressed(path, **arrays)
 
     @property
     def num_sites(self):
@@ -135,6 +159,26 @@ class CompressedMatrix:
                     unset = unset[np.isnan(value[unset])]
                 D[site.id] = np.where(in_tree[nodes], value[nodes], 0)
         return D
+
+
+def load_compressed_matrix(path, ts):
+    """
+    Load a CompressedMatrix saved with CompressedMatrix.dump for the specified
+    tree sequence.
+    """
+    with np.load(path) as data:
+        if int(data["num_nodes"]) != ts.num_nodes or not np.array_equal(
+            data["sites_position"], ts.sites_position
+        ):
+            raise ValueError("Compressed matrix does not match the tree sequence")
+        return CompressedMatrix(
+            ts,
+            data["normalisation_factor"],
+            data["offsets"],
+            data["nodes"],
+            data["values"],
+            data["flags"] if "flags" in data else None,
+        )
 
 
 class AncestorMatcher(_tsls.AncestorMatcher):
@@ -195,6 +239,21 @@ class AncestorMatcher(_tsls.AncestorMatcher):
         path_len, left, right, parent, matched = super().find_path(h, start, end)
         match_out[:] = matched
         return left[:path_len], right[:path_len], parent[:path_len]
+
+    def viterbi_matrix(self, h, start=0, end=None):
+        """
+        Run the Viterbi algorithm on the haplotype h over sites [start, end)
+        and return the ((left, right, parent), matched, matrix) tuple: the
+        copying path (right-to-left, as find_path), the matched haplotype, and
+        the CompressedMatrix of the values stored in the traceback.
+        """
+        if end is None:
+            end = self.ts.num_sites
+        path_len, left, right, parent, matched, arrays = super().viterbi_matrix(
+            h, start, end
+        )
+        path = (left[:path_len], right[:path_len], parent[:path_len])
+        return path, matched, CompressedMatrix(self.ts, *arrays)
 
     def forward_matrix(self, h):
         """

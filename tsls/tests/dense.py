@@ -101,23 +101,33 @@ def backward(A, present, continuous, h, rho, mu, num_alleles, n, c, threshold=0)
     return B
 
 
-def viterbi_log_likelihood(A, present, continuous, h, rho, mu, num_alleles, n):
+def viterbi_matrix(A, present, continuous, h, rho, mu, num_alleles, n):
     """
-    Return the log likelihood of the most likely path, where staying on a
-    node has probability (1 - rho + rho / n) and switching to a given node
-    has probability rho / n.
+    Return the (V, c) tuple of Viterbi values normalised by the maximum at
+    each site, and the maximum values c, where staying on a node has
+    probability (1 - rho + rho / n) and switching to a given node has
+    probability rho / n.
     """
     m, N = A.shape
+    V = np.zeros((m, N))
+    c = np.zeros(m)
     v = present[0].astype(float)
-    log_likelihood = 0
     for j in range(m):
         v = np.where(continuous[j], v, 0)
         v = np.maximum(v * (1 - rho[j] + rho[j] / n), rho[j] / n)
         v = np.where(present[j], v * emission(A[j], h[j], mu[j], num_alleles), 0)
-        max_v = np.max(v)
-        log_likelihood += np.log(max_v)
-        v = v / max_v
-    return log_likelihood
+        c[j] = np.max(v)
+        v = v / c[j]
+        V[j] = v
+    return V, c
+
+
+def viterbi_log_likelihood(A, present, continuous, h, rho, mu, num_alleles, n):
+    """
+    Return the log likelihood of the most likely path.
+    """
+    _, c = viterbi_matrix(A, present, continuous, h, rho, mu, num_alleles, n)
+    return np.sum(np.log(c))
 
 
 def path_log_likelihood(A, present, continuous, h, rho, mu, num_alleles, n, path):
