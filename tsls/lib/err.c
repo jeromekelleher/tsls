@@ -54,6 +54,9 @@ tsls_strerror(int err)
         case TSLS_ERR_BAD_NORMALISATION_FACTOR:
             ret = "Forward normalisation factors must be > 0";
             break;
+        case TSLS_ERR_BAD_PRUNING:
+            ret = "Bad pruning: relative factor must be in [0, 1] and top_n >= 1";
+            break;
     }
     return ret;
 }

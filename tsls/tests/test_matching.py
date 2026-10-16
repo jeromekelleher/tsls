@@ -178,11 +178,54 @@ def isolated_root_ts():
     return finalise(tables)
 
 
+def gap_ts():
+    # Node 3 is in the left and right trees but not in the middle tree, which
+    # has no sites, so copying node 3 across the middle tree requires a
+    # recombination. Node 4 is only in the middle tree, and so is never a
+    # state at a site.
+    #
+    # 2.00┊    5    ┊    5    ┊    5    ┊
+    #     ┊  ┏━┻┓   ┊  ┏━┻┓   ┊  ┏━┻┓   ┊
+    # 1.50┊  ┃  ┃   ┊  4  ┃   ┊  ┃  ┃   ┊
+    #     ┊  ┃  ┃   ┊ ┏┻┓ ┃   ┊  ┃  ┃   ┊
+    # 1.00┊  3  ┃   ┊ ┃ ┃ ┃   ┊  3  ┃   ┊
+    #     ┊ ┏┻┓ ┃   ┊ ┃ ┃ ┃   ┊ ┏┻┓ ┃   ┊
+    # 0.00┊ 0 1 2   ┊ 0 1 2   ┊ 0 1 2   ┊
+    #     0         4         8        12
+    tables = tskit.TableCollection(sequence_length=12)
+    for t in [0, 0, 0, 1, 1.5, 2]:
+        tables.nodes.add_row(flags=tskit.NODE_IS_SAMPLE if t == 0 else 0, time=t)
+    for left, right, parent, child in [
+        (0, 4, 3, 0),
+        (0, 4, 3, 1),
+        (8, 12, 3, 0),
+        (8, 12, 3, 1),
+        (4, 8, 4, 0),
+        (4, 8, 4, 1),
+        (0, 4, 5, 3),
+        (8, 12, 5, 3),
+        (4, 8, 5, 4),
+        (0, 12, 5, 2),
+    ]:
+        tables.edges.add_row(left, right, parent, child)
+    add_mutations(
+        tables,
+        [
+            (1, "A", [(3, "C")]),
+            (3, "G", [(0, "T"), (2, "A")]),
+            (9, "T", [(3, "G"), (1, "A")]),
+            (11, "C", [(5, "A"), (0, "G")]),
+        ],
+    )
+    return finalise(tables)
+
+
 EXAMPLES = {
     "single_tree": single_tree_ts,
     "two_trees": two_tree_ts,
     "forest": forest_ts,
     "isolated_root": isolated_root_ts,
+    "gap": gap_ts,
 }
 ALLELES = ACGT + ["-"]
 PARAMS = [(1e-2, 1e-2), (0.2, 0.05), (1e-4, 1e-3)]
@@ -241,13 +284,13 @@ def path_by_site(ts, left, right, parent):
 @pytest.fixture(scope="module", params=list(EXAMPLES))
 def example(request):
     ts = EXAMPLES[request.param]()
-    A, present = dense.node_states(ts, ALLELES)
-    return ts, A, present
+    A, present, continuous = dense.node_states(ts, ALLELES)
+    return ts, A, present, continuous
 
 
 class TestExamples:
     def test_node_states(self, example):
-        ts, A, present = example
+        ts, A, present, continuous = example
         G = ts.genotype_matrix(isolated_as_missing=False, alleles=tuple(ALLELES))
         np.testing.assert_array_equal(A[:, ts.samples()], G)
         assert np.any(np.bincount(ts.mutations_site) > 1)
@@ -257,7 +300,7 @@ class TestExamples:
 @pytest.mark.parametrize(("rho", "mu"), PARAMS)
 class TestAgainstDense:
     def test_viterbi(self, example, weight_by_n, rho, mu):
-        ts, A, present = example
+        ts, A, present, continuous = example
         am, n = make_matcher(ts, rho, mu, weight_by_n)
         m = ts.num_sites
         rho_a = np.full(m, rho)
@@ -269,33 +312,35 @@ class TestAgainstDense:
             np.testing.assert_array_equal(match, A[np.arange(m), path])
             assert np.all(present[np.arange(m), path])
             value = dense.path_log_likelihood(
-                A, present, h, rho_a, mu_a, len(ALLELES), n, path
+                A, present, continuous, h, rho_a, mu_a, len(ALLELES), n, path
             )
             optimum = dense.viterbi_log_likelihood(
-                A, present, h, rho_a, mu_a, len(ALLELES), n
+                A, present, continuous, h, rho_a, mu_a, len(ALLELES), n
             )
             assert value == pytest.approx(optimum, rel=1e-9)
 
     def test_forward_backward(self, example, weight_by_n, rho, mu):
-        ts, A, present = example
+        ts, A, present, continuous = example
         am, n = make_matcher(ts, rho, mu, weight_by_n)
         m = ts.num_sites
         rho_a = np.full(m, rho)
         mu_a = np.full(m, mu)
         for h in queries(ts, A, present):
             fm = am.forward_matrix(h)
-            F, c = dense.forward(A, present, h, rho_a, mu_a, len(ALLELES), n)
+            F, c = dense.forward(A, present, continuous, h, rho_a, mu_a, len(ALLELES), n)
             np.testing.assert_allclose(fm.normalisation_factor, c, rtol=1e-12)
             np.testing.assert_allclose(fm.decode(), F, rtol=1e-12, atol=1e-300)
             assert fm.log_likelihood == pytest.approx(np.sum(np.log(c)))
 
             bm = am.backward_matrix(h, fm.normalisation_factor)
-            B = dense.backward(A, present, h, rho_a, mu_a, len(ALLELES), n, c)
+            B = dense.backward(
+                A, present, continuous, h, rho_a, mu_a, len(ALLELES), n, c
+            )
             np.testing.assert_allclose(bm.decode(), B, rtol=1e-12, atol=1e-300)
             np.testing.assert_allclose(np.sum(F * B, axis=1), 1)
 
     def test_likelihood_threshold(self, example, weight_by_n, rho, mu):
-        ts, A, present = example
+        ts, A, present, continuous = example
         threshold = 1e-3
         am, n = make_matcher(ts, rho, mu, weight_by_n, likelihood_threshold=threshold)
         m = ts.num_sites
@@ -304,12 +349,29 @@ class TestAgainstDense:
         for h in queries(ts, A, present):
             fm = am.forward_matrix(h)
             F, c = dense.forward(
-                A, present, h, rho_a, mu_a, len(ALLELES), n, threshold=threshold
+                A,
+                present,
+                continuous,
+                h,
+                rho_a,
+                mu_a,
+                len(ALLELES),
+                n,
+                threshold=threshold,
             )
             np.testing.assert_allclose(fm.decode(), F, rtol=1e-12)
             bm = am.backward_matrix(h, fm.normalisation_factor)
             B = dense.backward(
-                A, present, h, rho_a, mu_a, len(ALLELES), n, c, threshold=threshold
+                A,
+                present,
+                continuous,
+                h,
+                rho_a,
+                mu_a,
+                len(ALLELES),
+                n,
+                c,
+                threshold=threshold,
             )
             np.testing.assert_allclose(bm.decode(), B, rtol=1e-12)
             match = np.zeros(m, dtype=np.int8)
@@ -319,19 +381,38 @@ class TestAgainstDense:
 
 
 class TestViterbiPaths:
+    def test_gap_requires_recombination(self):
+        # Copying node 3 across the middle tree, where it is not in the tree,
+        # needs two switches, so a node in every tree is preferred.
+        ts = gap_ts()
+        A, _, _ = dense.node_states(ts, ALLELES)
+        am, _ = make_matcher(ts, 1e-4, 1e-2, True)
+        h = A[:, 3]
+        match = np.zeros(ts.num_sites, dtype=np.int8)
+        _, _, parent = am.find_path(h, 0, ts.num_sites, match)
+        assert 3 not in parent
+        # With a high recombination rate, we copy node 3 in two segments.
+        am, _ = make_matcher(ts, 0.3, 1e-3, True)
+        left, right, parent = am.find_path(h, 0, ts.num_sites, match)
+        # Breakpoints are at site positions: the first site after the gap.
+        assert list(parent) == [3, 3]
+        assert list(left) == [9, 0]
+        np.testing.assert_array_equal(match, h)
+
     @pytest.mark.parametrize("name", list(EXAMPLES))
     def test_exact_copy(self, name):
         # Each node that is in every tree and has a unique haplotype is
         # copied exactly with no recombination.
         ts = EXAMPLES[name]()
-        A, present = dense.node_states(ts, ALLELES)
+        A, _, continuous = dense.node_states(ts, ALLELES)
         am, _ = make_matcher(ts, 1e-4, 1e-3, True)
         m = ts.num_sites
+        always = np.all(continuous, axis=0)
         for u in range(ts.num_nodes):
             h = A[:, u]
-            if not np.all(present[:, u]):
+            if not always[u]:
                 continue
-            num_same = np.sum(np.all(A == h[:, None], axis=0) & np.all(present, axis=0))
+            num_same = np.sum(np.all(A == h[:, None], axis=0) & always)
             if num_same > 1:
                 continue
             match = np.zeros(m, dtype=np.int8)
@@ -344,7 +425,7 @@ class TestViterbiPaths:
     def test_two_tree_recombinant(self):
         # Copy node 4 (only in the left tree) then node 7 (only in the right)
         ts = two_tree_ts()
-        A, _ = dense.node_states(ts, ALLELES)
+        A, _, _ = dense.node_states(ts, ALLELES)
         h = np.concatenate([A[:3, 4], A[3:, 7]])
         am, _ = make_matcher(ts, 1e-2, 1e-3, True)
         match = np.zeros(ts.num_sites, dtype=np.int8)
@@ -357,7 +438,7 @@ class TestViterbiPaths:
 
     def test_isolated_node_never_copied(self):
         ts = isolated_root_ts()
-        A, present = dense.node_states(ts, ALLELES)
+        A, present, _ = dense.node_states(ts, ALLELES)
         assert not np.any(present[:, 0])
         am, _ = make_matcher(ts, 0.2, 0.05, True)
         for h in queries(ts, A, present):
@@ -367,7 +448,7 @@ class TestViterbiPaths:
 
     def test_start_end(self):
         ts = two_tree_ts()
-        A, _ = dense.node_states(ts, ALLELES)
+        A, _, _ = dense.node_states(ts, ALLELES)
         h = A[:, 0].copy()
         h[0] = -1
         h[-1] = -1
@@ -466,7 +547,7 @@ class TestInterface:
         # Running the algorithms repeatedly on the same matcher gives the
         # same results.
         ts = two_tree_ts()
-        A, present = dense.node_states(ts, ALLELES)
+        A, present, _ = dense.node_states(ts, ALLELES)
         am, _ = make_matcher(ts, 0.2, 0.05, True)
         h = queries(ts, A, present)[-1]
         m = ts.num_sites
@@ -491,3 +572,95 @@ class TestInterface:
         assert len(nodes) == len(values) > 0
         D = fm.decode([0, 6])
         assert D.shape == (ts.num_sites, 2)
+
+
+class TestPruning:
+    def run_all(self, ts, h, **kwargs):
+        m = ts.num_sites
+        mi = tsls.MatcherIndexes(ts, alleles=ALLELES)
+        am = tsls.AncestorMatcher(
+            mi, np.full(m, 0.05), np.full(m, 0.02), extended_checks=True, **kwargs
+        )
+        match = np.zeros(m, dtype=np.int8)
+        path = am.find_path(h, 0, m, match)
+        fm = am.forward_matrix(h)
+        bm = am.backward_matrix(h, fm.normalisation_factor)
+        return am, path, match, fm.decode(), bm.decode()
+
+    @pytest.mark.parametrize("name", list(EXAMPLES))
+    @pytest.mark.parametrize("pruning", [("relative", 0), ("top_n", 1000)])
+    def test_weak_pruning_is_exact(self, name, pruning):
+        ts = EXAMPLES[name]()
+        A, present, _ = dense.node_states(ts, ALLELES)
+        for h in queries(ts, A, present):
+            _, path1, match1, F1, B1 = self.run_all(ts, h)
+            _, path2, match2, F2, B2 = self.run_all(ts, h, pruning=pruning)
+            for x, y in zip(path1, path2):
+                np.testing.assert_array_equal(x, y)
+            np.testing.assert_array_equal(match1, match2)
+            np.testing.assert_array_equal(F1, F2)
+            np.testing.assert_array_equal(B1, B2)
+
+    @pytest.mark.parametrize("pruning", [("relative", 0.5), ("top_n", 1)])
+    def test_strong_pruning_reduces_traceback(self, pruning):
+        ts = two_tree_ts()
+        A, present, _ = dense.node_states(ts, ALLELES)
+        h = queries(ts, A, present)[-2]
+        am1, *_ = self.run_all(ts, h)
+        size1 = am1.mean_traceback_size
+        am2, *_ = self.run_all(ts, h, pruning=pruning)
+        assert am2.mean_traceback_size < size1
+
+    @pytest.mark.parametrize("name", list(EXAMPLES))
+    @pytest.mark.parametrize("weight_by_n", [True, False])
+    def test_lossless_floor(self, name, weight_by_n):
+        # Values below t = (rho / n) / (1 - rho + rho / n) are beaten by
+        # recombination at the next site, so flooring at t does not change
+        # the Viterbi likelihood.
+        ts = EXAMPLES[name]()
+        A, present, continuous = dense.node_states(ts, ALLELES)
+        rho, mu = 0.05, 0.02
+        n = ts.num_nodes if weight_by_n else 1
+        threshold = (rho / n) / (1 - rho + rho / n)
+        m = ts.num_sites
+        am, _ = make_matcher(
+            ts, rho, mu, weight_by_n, likelihood_threshold=threshold * (1 - 1e-12)
+        )
+        rho_a = np.full(m, rho)
+        mu_a = np.full(m, mu)
+        for h in queries(ts, A, present):
+            match = np.zeros(m, dtype=np.int8)
+            path = path_by_site(ts, *am.find_path(h, 0, m, match))
+            value = dense.path_log_likelihood(
+                A, present, continuous, h, rho_a, mu_a, len(ALLELES), n, path
+            )
+            optimum = dense.viterbi_log_likelihood(
+                A, present, continuous, h, rho_a, mu_a, len(ALLELES), n
+            )
+            assert value == pytest.approx(optimum, rel=1e-9)
+
+    def test_count_distinct(self):
+        ts = two_tree_ts()
+        A, present, _ = dense.node_states(ts, ALLELES)
+        h = queries(ts, A, present)[-2]
+        am, *_ = self.run_all(ts, h, count_distinct=True)
+        assert 0 < am.mean_num_distinct_values <= am.mean_traceback_size
+        am, *_ = self.run_all(ts, h)
+        assert am.mean_num_distinct_values == 0
+
+    @pytest.mark.parametrize(
+        "pruning", [("relative", 2), ("relative", -1), ("top_n", 0), ("top_n", 0.5)]
+    )
+    def test_bad_pruning(self, pruning):
+        ts = single_tree_ts()
+        mi = tsls.MatcherIndexes(ts, alleles=ALLELES)
+        m = ts.num_sites
+        with pytest.raises(tsls.LibraryError, match="pruning"):
+            tsls.AncestorMatcher(mi, np.zeros(m), np.zeros(m), pruning=pruning)
+
+    def test_unknown_pruning_mode(self):
+        ts = single_tree_ts()
+        mi = tsls.MatcherIndexes(ts, alleles=ALLELES)
+        m = ts.num_sites
+        with pytest.raises(ValueError, match="Unknown pruning"):
+            tsls.AncestorMatcher(mi, np.zeros(m), np.zeros(m), pruning=("x", 1))

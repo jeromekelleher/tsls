@@ -224,3 +224,9 @@ __marimo__/
 # Benchmarking data and results
 benchmarking/data/
 benchmarking/results/
+
+# Verification output
+verification/tmp__NOBACKUP__/
+
+# Experiment results
+experiments/*/results/

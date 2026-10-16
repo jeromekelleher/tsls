@@ -106,23 +106,34 @@ class CompressedMatrix:
         """
         Return the dense (num_sites, len(nodes)) array of values for the
         specified nodes (default: all nodes). Nodes that are not in the tree
-        at a site have value 0. This is intended for small examples.
+        at a site have value 0.
         """
+        N = self.ts.num_nodes
         if nodes is None:
-            nodes = np.arange(self.ts.num_nodes)
+            nodes = np.arange(N)
         nodes = np.asarray(nodes, dtype=np.int32)
         D = np.zeros((self.num_sites, len(nodes)))
         for tree in self.ts.trees():
+            # The parent array has an extra entry for the virtual root, which
+            # is the parent of the roots (index -1) and never has a value.
+            parent = tree.parent_array
+            in_tree = (parent[:N] != -1) | (tree.num_children_array[:N] > 0)
             for site in tree.sites():
                 site_nodes, site_values = self.get_site(site.id)
-                value = dict(zip(site_nodes.tolist(), site_values.tolist()))
-                for j, u in enumerate(nodes.tolist()):
-                    if tree.parent(u) == -1 and tree.num_children(u) == 0:
-                        continue
-                    v = u
-                    while v not in value:
-                        v = tree.parent(v)
-                    D[site.id, j] = value[v]
+                value = np.full(N + 1, np.nan)
+                value[site_nodes] = site_values
+                # Each node takes the value of its nearest ancestor with a
+                # value: at each step, copy values from the ancestor and move
+                # up a level, so this takes as many steps as the tree is deep.
+                ancestor = parent.copy()
+                unset = np.where(in_tree & np.isnan(value[:N]))[0]
+                while len(unset) > 0:
+                    if np.any(ancestor[unset] == -1):
+                        raise ValueError("Node in tree with no stored ancestor")
+                    value[unset] = value[ancestor[unset]]
+                    ancestor[unset] = parent[ancestor[unset]]
+                    unset = unset[np.isnan(value[unset])]
+                D[site.id] = np.where(in_tree[nodes], value[nodes], 0)
         return D
 
 
@@ -131,7 +142,17 @@ class AncestorMatcher(_tsls.AncestorMatcher):
     Runs the Viterbi, forward and backward algorithms for haplotypes against
     the tree sequence in the specified MatcherIndexes, using the specified
     per-site recombination and mismatch probabilities.
+
+    After normalisation at each site, values below likelihood_threshold are
+    set to it. The experimental ``pruning`` option also sets the values of
+    some nodes to likelihood_threshold: either ``("relative", f)``, for
+    nodes with values less than f times the maximum, or ``("top_n", n)``,
+    for all but the n nodes with the largest values. If ``count_distinct``
+    is True, the mean number of distinct values per site in Viterbi is
+    recorded in ``mean_num_distinct_values``.
     """
+
+    PRUNING_MODES = {"relative": 1, "top_n": 2}
 
     def __init__(
         self,
@@ -142,8 +163,16 @@ class AncestorMatcher(_tsls.AncestorMatcher):
         likelihood_threshold=None,
         weight_by_n=None,
         extended_checks=False,
+        pruning=None,
+        count_distinct=False,
     ):
-        kwargs = {"extended_checks": extended_checks}
+        kwargs = {"extended_checks": extended_checks, "count_distinct": count_distinct}
+        if pruning is not None:
+            mode, parameter = pruning
+            if mode not in self.PRUNING_MODES:
+                raise ValueError(f"Unknown pruning mode {mode!r}")
+            kwargs["pruning_mode"] = self.PRUNING_MODES[mode]
+            kwargs["pruning_parameter"] = parameter
         if likelihood_threshold is not None:
             kwargs["likelihood_threshold"] = likelihood_threshold
         if weight_by_n is not None:

@@ -20,7 +20,9 @@
  *
  * When a node enters the tree it gets the value 0, and so it can only be
  * reached by recombination. When a node leaves the tree, the probability
- * of continuing from it is only the probability of recombination.
+ * of continuing from it is only the probability of recombination. So a node
+ * can only be copied from one site to the next without recombination if it
+ * is in the tree over the whole interval between them.
  */
 
 #include "tsls.h"
@@ -543,6 +545,7 @@ ancestor_matcher_alloc(ancestor_matcher_t *self,
     self->likelihood_cache = malloc((N + 1) * sizeof(*self->likelihood_cache));
     self->likelihood_nodes = malloc((N + 1) * sizeof(*self->likelihood_nodes));
     self->likelihood_nodes_tmp = malloc((N + 1) * sizeof(*self->likelihood_nodes_tmp));
+    self->values_tmp = malloc((N + 1) * sizeof(*self->values_tmp));
 
     if (self->recombination_rate == NULL || self->mismatch_rate == NULL
         || self->traceback == NULL || self->max_likelihood_node == NULL
@@ -551,7 +554,7 @@ ancestor_matcher_alloc(ancestor_matcher_t *self,
         || self->num_inheriting == NULL || self->recombination_required == NULL
         || self->likelihood == NULL || self->likelihood_cache == NULL
         || self->likelihood_nodes == NULL || self->likelihood_nodes_tmp == NULL
-        || self->allelic_state == NULL) {
+        || self->values_tmp == NULL || self->allelic_state == NULL) {
         ret = TSLS_ERR_NO_MEMORY;
         goto out;
     }
@@ -594,11 +597,116 @@ ancestor_matcher_free(ancestor_matcher_t *self)
     tsi_safe_free(self->likelihood_cache);
     tsi_safe_free(self->likelihood_nodes);
     tsi_safe_free(self->likelihood_nodes_tmp);
+    tsi_safe_free(self->values_tmp);
     tsi_safe_free(self->allelic_state);
     tsi_safe_free(self->max_likelihood_node);
     tsi_safe_free(self->traceback);
     tsi_blkalloc_free(&self->traceback_allocator);
     return 0;
+}
+
+int
+ancestor_matcher_set_pruning(ancestor_matcher_t *self, int mode, double parameter)
+{
+    int ret = 0;
+
+    if (mode == TSLS_PRUNE_NONE) {
+        parameter = 0;
+    } else if (mode == TSLS_PRUNE_RELATIVE) {
+        if (!(parameter >= 0 && parameter <= 1)) {
+            ret = TSLS_ERR_BAD_PRUNING;
+            goto out;
+        }
+    } else if (mode == TSLS_PRUNE_TOP_N) {
+        if (!(parameter >= 1)) {
+            ret = TSLS_ERR_BAD_PRUNING;
+            goto out;
+        }
+    } else {
+        ret = TSLS_ERR_BAD_PRUNING;
+        goto out;
+    }
+    self->pruning_mode = mode;
+    self->pruning_parameter = parameter;
+out:
+    return ret;
+}
+
+static int
+cmp_double(const void *a, const void *b)
+{
+    const double x = *(const double *) a;
+    const double y = *(const double *) b;
+    return (x > y) - (x < y);
+}
+
+/* Copy the current likelihood values into values_tmp, sorted. */
+static void
+ancestor_matcher_sort_values(ancestor_matcher_t *self)
+{
+    int j;
+
+    for (j = 0; j < self->num_likelihood_nodes; j++) {
+        self->values_tmp[j] = self->likelihood[self->likelihood_nodes[j]];
+    }
+    qsort(self->values_tmp, (size_t) self->num_likelihood_nodes, sizeof(double),
+        cmp_double);
+}
+
+/* Apply the experimental pruning, giving pruned nodes the value
+ * likelihood_threshold. The values must be normalised. */
+static void
+ancestor_matcher_prune(ancestor_matcher_t *self)
+{
+    double *restrict L = self->likelihood;
+    const tsk_id_t *restrict L_nodes = self->likelihood_nodes;
+    const int num_likelihood_nodes = self->num_likelihood_nodes;
+    double max_L, cutoff;
+    int j, n;
+
+    if (self->pruning_mode == TSLS_PRUNE_NONE || num_likelihood_nodes == 0) {
+        return;
+    }
+    if (self->pruning_mode == TSLS_PRUNE_RELATIVE) {
+        max_L = 0;
+        for (j = 0; j < num_likelihood_nodes; j++) {
+            max_L = TSK_MAX(max_L, L[L_nodes[j]]);
+        }
+        cutoff = self->pruning_parameter * max_L;
+    } else {
+        n = (int) self->pruning_parameter;
+        if (num_likelihood_nodes <= n) {
+            return;
+        }
+        ancestor_matcher_sort_values(self);
+        /* Keep values >= the nth largest (ties at the cutoff are kept) */
+        cutoff = self->values_tmp[num_likelihood_nodes - n];
+    }
+    for (j = 0; j < num_likelihood_nodes; j++) {
+        if (L[L_nodes[j]] < cutoff) {
+            L[L_nodes[j]] = self->likelihood_threshold;
+        }
+    }
+}
+
+/* Count the number of distinct likelihood values at this site. */
+static void
+ancestor_matcher_count_distinct(ancestor_matcher_t *self)
+{
+    int j;
+    size_t num_distinct;
+
+    if (!(self->flags & TSLS_COUNT_DISTINCT) || self->num_likelihood_nodes == 0) {
+        return;
+    }
+    ancestor_matcher_sort_values(self);
+    num_distinct = 1;
+    for (j = 1; j < self->num_likelihood_nodes; j++) {
+        if (self->values_tmp[j] != self->values_tmp[j - 1]) {
+            num_distinct++;
+        }
+    }
+    self->total_distinct_values += num_distinct;
 }
 
 static inline void
@@ -1177,6 +1285,8 @@ ancestor_matcher_process_site_viterbi(
         u = L_nodes[j];
         L[u] = TSK_MAX(L[u] / max_L, self->likelihood_threshold);
     }
+    ancestor_matcher_prune(self);
+    ancestor_matcher_count_distinct(self);
     ret = ancestor_matcher_store_traceback(self, site);
     if (ret != 0) {
         goto out;
@@ -1232,6 +1342,7 @@ ancestor_matcher_process_site_forward(ancestor_matcher_t *self, const tsk_id_t s
         u = L_nodes[j];
         L[u] = TSK_MAX(L[u] / normalisation_factor, self->likelihood_threshold);
     }
+    ancestor_matcher_prune(self);
     *previous_total = ancestor_matcher_total_likelihood(self);
     ret = compressed_matrix_store_site(output, site, normalisation_factor,
         self->num_likelihood_nodes, L_nodes, L);
@@ -1279,6 +1390,7 @@ ancestor_matcher_process_site_backward(ancestor_matcher_t *self, const tsk_id_t 
             L[u] = TSK_MAX(
                 x / transition->normalisation_factor, self->likelihood_threshold);
         }
+        ancestor_matcher_prune(self);
     }
     ancestor_matcher_insert_mutation_likelihoods(self, site);
     ret = compressed_matrix_store_site(output, site, forward_normalisation_factor[site],
@@ -1502,6 +1614,7 @@ ancestor_matcher_reset_traceback(ancestor_matcher_t *self)
         tsi_blkalloc_reset(&self->traceback_allocator);
     }
     self->total_traceback_size = 0;
+    self->total_distinct_values = 0;
 out:
     return ret;
 }
@@ -1588,6 +1701,15 @@ ancestor_matcher_get_mean_traceback_size(ancestor_matcher_t *self)
         return 0;
     }
     return (double) self->total_traceback_size / ((double) self->num_sites);
+}
+
+double
+ancestor_matcher_get_mean_num_distinct_values(ancestor_matcher_t *self)
+{
+    if (self->num_sites == 0) {
+        return 0;
+    }
+    return (double) self->total_distinct_values / ((double) self->num_sites);
 }
 
 size_t

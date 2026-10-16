@@ -16,6 +16,7 @@
 #define TSLS_ERR_BAD_COORDINATE                             -12
 #define TSLS_ERR_BAD_SITE_RANGE                             -13
 #define TSLS_ERR_BAD_NORMALISATION_FACTOR                   -14
+#define TSLS_ERR_BAD_PRUNING                                -15
 // clang-format on
 
 #ifdef __GNUC__
