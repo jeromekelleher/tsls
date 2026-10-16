@@ -1,0 +1,26 @@
+[project]
+name = "tsls-verification"
+version = "0.0.0"
+description = "Statistical validation of the tsls Li and Stephens HMM engine."
+requires-python = ">=3.11"
+dependencies = [
+    "matplotlib",
+    "msprime",
+    "numpy>=2",
+    "pandas",
+    "tqdm",
+    "tskit>=1.0.0",
+    "tsls",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+tsls = { path = "../tsls", editable = true }
+
+[tool.ruff]
+line-length = 89
+
+[tool.ruff.lint.isort]
+known-first-party = ["dense", "tsls"]
