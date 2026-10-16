@@ -9,4 +9,5 @@ from .matching import (  # noqa: F401
     CompressedMatrix,
     MatcherIndexes,
     encode_alleles,
+    load_compressed_matrix,
 )

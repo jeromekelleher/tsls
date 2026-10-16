@@ -358,8 +358,9 @@ compressed_matrix_alloc(compressed_matrix_t *self, size_t num_sites, size_t bloc
     self->num_values = calloc(num_sites + 1, sizeof(tsk_size_t));
     self->nodes = calloc(num_sites + 1, sizeof(tsk_id_t *));
     self->values = calloc(num_sites + 1, sizeof(double *));
+    self->flags = calloc(num_sites + 1, sizeof(int8_t *));
     if (self->normalisation_factor == NULL || self->num_values == NULL
-        || self->nodes == NULL || self->values == NULL) {
+        || self->nodes == NULL || self->values == NULL || self->flags == NULL) {
         ret = TSLS_ERR_NO_MEMORY;
         goto out;
     }
@@ -378,6 +379,7 @@ compressed_matrix_free(compressed_matrix_t *self)
     tsi_safe_free(self->num_values);
     tsi_safe_free(self->nodes);
     tsi_safe_free(self->values);
+    tsi_safe_free(self->flags);
     tsi_blkalloc_free(&self->allocator);
     return 0;
 }
@@ -401,15 +403,30 @@ aligned_size(size_t size)
     return (size + 7) & ~((size_t) 7);
 }
 
+/* Store the values of the specified nodes at this site, and if R is not NULL
+ * their recombination_required flags. */
 static int WARN_UNUSED
 compressed_matrix_store_site(compressed_matrix_t *self, tsk_id_t site,
     double normalisation_factor, int num_values, const tsk_id_t *restrict nodes,
-    const double *restrict L)
+    const double *restrict L, const int8_t *restrict R)
 {
     int ret = 0;
     int j;
     tsk_id_t *restrict nodes_out;
     double *restrict values_out;
+    int8_t *restrict flags_out = NULL;
+
+    if (R != NULL) {
+        flags_out = tsi_blkalloc_get(
+            &self->allocator, aligned_size((size_t) num_values * sizeof(int8_t)));
+        if (flags_out == NULL) {
+            ret = TSLS_ERR_NO_MEMORY;
+            goto out;
+        }
+        for (j = 0; j < num_values; j++) {
+            flags_out[j] = R[nodes[j]];
+        }
+    }
 
     values_out = tsi_blkalloc_get(
         &self->allocator, aligned_size((size_t) num_values * sizeof(double)));
@@ -427,6 +444,7 @@ compressed_matrix_store_site(compressed_matrix_t *self, tsk_id_t site,
     self->num_values[site] = (tsk_size_t) num_values;
     self->nodes[site] = nodes_out;
     self->values[site] = values_out;
+    self->flags[site] = flags_out;
 out:
     return ret;
 }
@@ -1223,8 +1241,8 @@ out:
 }
 
 static int WARN_UNUSED
-ancestor_matcher_process_site_viterbi(
-    ancestor_matcher_t *self, const tsk_id_t site, const allele_t state)
+ancestor_matcher_process_site_viterbi(ancestor_matcher_t *self, const tsk_id_t site,
+    const allele_t state, compressed_matrix_t *output)
 {
     int ret = 0;
     const int num_likelihood_nodes = self->num_likelihood_nodes;
@@ -1291,6 +1309,13 @@ ancestor_matcher_process_site_viterbi(
     if (ret != 0) {
         goto out;
     }
+    if (output != NULL) {
+        ret = compressed_matrix_store_site(output, site, max_L,
+            self->num_likelihood_nodes, L_nodes, L, recombination_required);
+        if (ret != 0) {
+            goto out;
+        }
+    }
     ancestor_matcher_coalesce_likelihoods(self);
 out:
     return ret;
@@ -1345,7 +1370,7 @@ ancestor_matcher_process_site_forward(ancestor_matcher_t *self, const tsk_id_t s
     ancestor_matcher_prune(self);
     *previous_total = ancestor_matcher_total_likelihood(self);
     ret = compressed_matrix_store_site(output, site, normalisation_factor,
-        self->num_likelihood_nodes, L_nodes, L);
+        self->num_likelihood_nodes, L_nodes, L, NULL);
     if (ret != 0) {
         goto out;
     }
@@ -1394,7 +1419,7 @@ ancestor_matcher_process_site_backward(ancestor_matcher_t *self, const tsk_id_t 
     }
     ancestor_matcher_insert_mutation_likelihoods(self, site);
     ret = compressed_matrix_store_site(output, site, forward_normalisation_factor[site],
-        self->num_likelihood_nodes, L_nodes, L);
+        self->num_likelihood_nodes, L_nodes, L, NULL);
     if (ret != 0) {
         goto out;
     }
@@ -1449,7 +1474,8 @@ ancestor_matcher_run(ancestor_matcher_t *self, int mode, tsk_id_t start, tsk_id_
             ancestor_matcher_check_state(self);
         }
         if (mode == MODE_VITERBI) {
-            ret = ancestor_matcher_process_site_viterbi(self, site, haplotype[site]);
+            ret = ancestor_matcher_process_site_viterbi(
+                self, site, haplotype[site], output);
         } else if (mode == MODE_FORWARD) {
             ret = ancestor_matcher_process_site_forward(
                 self, site, haplotype[site], &previous_total, output);
@@ -1619,10 +1645,15 @@ out:
     return ret;
 }
 
+/* Run the Viterbi algorithm and traceback. If output is not NULL, the
+ * normalised values and recombination_required flags stored in the
+ * traceback at each site are also stored in output, with the maximum
+ * likelihood (before normalisation) as the normalisation factor. */
 int
-ancestor_matcher_find_path(ancestor_matcher_t *self, tsk_id_t start, tsk_id_t end,
-    const allele_t *haplotype, allele_t *matched_haplotype, size_t *path_length,
-    tsk_id_t *path_left, tsk_id_t *path_right, tsk_id_t *path_parent)
+ancestor_matcher_find_path_matrix(ancestor_matcher_t *self, tsk_id_t start,
+    tsk_id_t end, const allele_t *haplotype, allele_t *matched_haplotype,
+    size_t *path_length, tsk_id_t *path_left, tsk_id_t *path_right,
+    tsk_id_t *path_parent, compressed_matrix_t *output)
 {
     int ret = 0;
 
@@ -1630,11 +1661,15 @@ ancestor_matcher_find_path(ancestor_matcher_t *self, tsk_id_t start, tsk_id_t en
         ret = TSLS_ERR_BAD_SITE_RANGE;
         goto out;
     }
+    if (output != NULL && output->num_sites != self->num_sites) {
+        ret = TSLS_ERR_BAD_SITE_RANGE;
+        goto out;
+    }
     ret = ancestor_matcher_reset_traceback(self);
     if (ret != 0) {
         goto out;
     }
-    ret = ancestor_matcher_run(self, MODE_VITERBI, start, end, haplotype, NULL, NULL);
+    ret = ancestor_matcher_run(self, MODE_VITERBI, start, end, haplotype, NULL, output);
     if (ret != 0) {
         goto out;
     }
@@ -1647,6 +1682,15 @@ out:
         self->num_sites * sizeof(*self->max_likelihood_node));
     memset(self->allelic_state, 0xff, self->num_nodes * sizeof(*self->allelic_state));
     return ret;
+}
+
+int
+ancestor_matcher_find_path(ancestor_matcher_t *self, tsk_id_t start, tsk_id_t end,
+    const allele_t *haplotype, allele_t *matched_haplotype, size_t *path_length,
+    tsk_id_t *path_left, tsk_id_t *path_right, tsk_id_t *path_parent)
+{
+    return ancestor_matcher_find_path_matrix(self, start, end, haplotype,
+        matched_haplotype, path_length, path_left, path_right, path_parent, NULL);
 }
 
 int

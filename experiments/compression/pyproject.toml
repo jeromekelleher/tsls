@@ -1,0 +1,27 @@
+[project]
+name = "tsls-compression-experiments"
+version = "0.0.0"
+description = "Analysis of likelihood compression in the tsls engine."
+requires-python = ">=3.11"
+dependencies = [
+    "matplotlib",
+    "msprime",
+    "numpy>=2",
+    "pandas",
+    "tabulate",
+    "tqdm",
+    "tskit>=1.0.0",
+    "tsls",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+tsls = { path = "../../tsls", editable = true }
+
+[tool.ruff]
+line-length = 89
+
+[tool.ruff.lint.isort]
+known-first-party = ["analysis", "thresholding", "tsls", "verification"]

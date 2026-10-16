@@ -430,6 +430,77 @@ out:
     return ret;
 }
 
+/* Return the compressed matrix as a tuple of flat arrays
+ * (normalisation_factor, offsets, nodes, values[, flags]), where the values
+ * at site j are values[offsets[j]: offsets[j + 1]] and similarly for nodes
+ * and flags. */
+static PyObject *
+compressed_matrix_to_tuple(const compressed_matrix_t *cm, bool with_flags)
+{
+    PyObject *ret = NULL;
+    PyArrayObject *norm = NULL;
+    PyArrayObject *offsets = NULL;
+    PyArrayObject *nodes = NULL;
+    PyArrayObject *values = NULL;
+    PyArrayObject *flags = NULL;
+    const size_t num_sites = cm->num_sites;
+    npy_intp dims[1];
+    uint64_t *offsets_data;
+    tsk_id_t *nodes_data;
+    double *values_data;
+    int8_t *flags_data = NULL;
+    size_t j, k, offset;
+
+    dims[0] = (npy_intp) num_sites;
+    norm = (PyArrayObject *) PyArray_SimpleNew(1, dims, NPY_FLOAT64);
+    dims[0] = (npy_intp) num_sites + 1;
+    offsets = (PyArrayObject *) PyArray_SimpleNew(1, dims, NPY_UINT64);
+    dims[0] = (npy_intp) compressed_matrix_get_total_values(cm);
+    nodes = (PyArrayObject *) PyArray_SimpleNew(1, dims, NPY_INT32);
+    values = (PyArrayObject *) PyArray_SimpleNew(1, dims, NPY_FLOAT64);
+    flags = (PyArrayObject *) PyArray_SimpleNew(1, dims, NPY_INT8);
+    if (norm == NULL || offsets == NULL || nodes == NULL || values == NULL
+        || flags == NULL) {
+        goto out;
+    }
+    memcpy(PyArray_DATA(norm), cm->normalisation_factor, num_sites * sizeof(double));
+    offsets_data = PyArray_DATA(offsets);
+    nodes_data = PyArray_DATA(nodes);
+    values_data = PyArray_DATA(values);
+    flags_data = PyArray_DATA(flags);
+    offset = 0;
+    for (j = 0; j < num_sites; j++) {
+        offsets_data[j] = offset;
+        for (k = 0; k < cm->num_values[j]; k++) {
+            nodes_data[offset] = cm->nodes[j][k];
+            values_data[offset] = cm->values[j][k];
+            flags_data[offset] = cm->flags[j] == NULL ? -1 : cm->flags[j][k];
+            offset++;
+        }
+    }
+    offsets_data[num_sites] = offset;
+    if (with_flags) {
+        ret = Py_BuildValue("(NNNNN)", norm, offsets, nodes, values, flags);
+        flags = NULL;
+    } else {
+        ret = Py_BuildValue("(NNNN)", norm, offsets, nodes, values);
+    }
+    if (ret == NULL) {
+        goto out;
+    }
+    norm = NULL;
+    offsets = NULL;
+    nodes = NULL;
+    values = NULL;
+out:
+    Py_XDECREF(norm);
+    Py_XDECREF(offsets);
+    Py_XDECREF(nodes);
+    Py_XDECREF(values);
+    Py_XDECREF(flags);
+    return ret;
+}
+
 /* Run the forward (if forward_norm is NULL) or backward algorithm, and
  * return the compressed matrix as a tuple of flat arrays
  * (normalisation_factor, offsets, nodes, values), where the values at site
@@ -442,18 +513,9 @@ AncestorMatcher_run_compressed_matrix(
     PyObject *ret = NULL;
     PyArrayObject *haplotype_array = NULL;
     PyArrayObject *forward_norm_array = NULL;
-    PyArrayObject *norm = NULL;
-    PyArrayObject *offsets = NULL;
-    PyArrayObject *nodes = NULL;
-    PyArrayObject *values = NULL;
     const size_t num_sites = self->ancestor_matcher->num_sites;
     compressed_matrix_t cm;
     bool cm_allocated = false;
-    npy_intp dims[1];
-    uint64_t *offsets_data;
-    tsk_id_t *nodes_data;
-    double *values_data;
-    size_t j, k, offset;
 
     haplotype_array
         = (PyArrayObject *) PyArray_FROMANY(haplotype, NPY_INT8, 1, 1, NPY_ARRAY_IN_ARRAY);
@@ -499,49 +561,104 @@ AncestorMatcher_run_compressed_matrix(
         goto out;
     }
 
-    dims[0] = (npy_intp) num_sites;
-    norm = (PyArrayObject *) PyArray_SimpleNew(1, dims, NPY_FLOAT64);
-    dims[0] = (npy_intp) num_sites + 1;
-    offsets = (PyArrayObject *) PyArray_SimpleNew(1, dims, NPY_UINT64);
-    dims[0] = (npy_intp) compressed_matrix_get_total_values(&cm);
-    nodes = (PyArrayObject *) PyArray_SimpleNew(1, dims, NPY_INT32);
-    values = (PyArrayObject *) PyArray_SimpleNew(1, dims, NPY_FLOAT64);
-    if (norm == NULL || offsets == NULL || nodes == NULL || values == NULL) {
-        goto out;
-    }
-    memcpy(PyArray_DATA(norm), cm.normalisation_factor, num_sites * sizeof(double));
-    offsets_data = PyArray_DATA(offsets);
-    nodes_data = PyArray_DATA(nodes);
-    values_data = PyArray_DATA(values);
-    offset = 0;
-    for (j = 0; j < num_sites; j++) {
-        offsets_data[j] = offset;
-        for (k = 0; k < cm.num_values[j]; k++) {
-            nodes_data[offset] = cm.nodes[j][k];
-            values_data[offset] = cm.values[j][k];
-            offset++;
-        }
-    }
-    offsets_data[num_sites] = offset;
-
-    ret = Py_BuildValue("(NNNN)", norm, offsets, nodes, values);
-    if (ret == NULL) {
-        goto out;
-    }
-    norm = NULL;
-    offsets = NULL;
-    nodes = NULL;
-    values = NULL;
+    ret = compressed_matrix_to_tuple(&cm, false);
 out:
     if (cm_allocated) {
         compressed_matrix_free(&cm);
     }
     Py_XDECREF(haplotype_array);
     Py_XDECREF(forward_norm_array);
-    Py_XDECREF(norm);
-    Py_XDECREF(offsets);
-    Py_XDECREF(nodes);
-    Py_XDECREF(values);
+    return ret;
+}
+
+/* Run the Viterbi algorithm, returning the find_path outputs followed by
+ * the compressed matrix of normalised Viterbi values with flags. */
+static PyObject *
+AncestorMatcher_viterbi_matrix(AncestorMatcher *self, PyObject *args, PyObject *kwds)
+{
+    int err;
+    PyObject *ret = NULL;
+    PyObject *matrix = NULL;
+    static char *kwlist[] = { "haplotype", "start", "end", NULL };
+    PyObject *haplotype = NULL;
+    PyArrayObject *haplotype_array = NULL;
+    PyArrayObject *left = NULL;
+    PyArrayObject *right = NULL;
+    PyArrayObject *parent = NULL;
+    PyArrayObject *match = NULL;
+    compressed_matrix_t cm;
+    bool cm_allocated = false;
+    size_t num_edges;
+    int start, end;
+    npy_intp dims[1];
+    size_t num_sites;
+
+    if (AncestorMatcher_check_state(self) != 0) {
+        goto out;
+    }
+    if (!PyArg_ParseTupleAndKeywords(
+            args, kwds, "Oii", kwlist, &haplotype, &start, &end)) {
+        goto out;
+    }
+    num_sites = self->ancestor_matcher->num_sites;
+    haplotype_array
+        = (PyArrayObject *) PyArray_FROMANY(haplotype, NPY_INT8, 1, 1, NPY_ARRAY_IN_ARRAY);
+    if (haplotype_array == NULL) {
+        goto out;
+    }
+    if (PyArray_DIM(haplotype_array, 0) != (npy_intp) num_sites) {
+        PyErr_SetString(PyExc_ValueError, "Incorrect size for input haplotype.");
+        goto out;
+    }
+    dims[0] = (npy_intp) num_sites;
+    left = (PyArrayObject *) PyArray_SimpleNew(1, dims, NPY_UINT32);
+    right = (PyArrayObject *) PyArray_SimpleNew(1, dims, NPY_UINT32);
+    parent = (PyArrayObject *) PyArray_SimpleNew(1, dims, NPY_INT32);
+    match = (PyArrayObject *) PyArray_SimpleNew(1, dims, NPY_INT8);
+    if (left == NULL || right == NULL || parent == NULL || match == NULL) {
+        goto out;
+    }
+    err = compressed_matrix_alloc(
+        &cm, num_sites, 2 * (self->ancestor_matcher->num_nodes + 1) * sizeof(double));
+    cm_allocated = true;
+    if (err != 0) {
+        handle_library_error(err);
+        goto out;
+    }
+    Py_BEGIN_ALLOW_THREADS
+    err = ancestor_matcher_find_path_matrix(self->ancestor_matcher, (tsk_id_t) start,
+        (tsk_id_t) end, (allele_t *) PyArray_DATA(haplotype_array),
+        (allele_t *) PyArray_DATA(match), &num_edges, PyArray_DATA(left),
+        PyArray_DATA(right), PyArray_DATA(parent), &cm);
+    Py_END_ALLOW_THREADS
+    if (err != 0) {
+        handle_library_error(err);
+        goto out;
+    }
+    matrix = compressed_matrix_to_tuple(&cm, true);
+    if (matrix == NULL) {
+        goto out;
+    }
+    ret = Py_BuildValue(
+        "(kNNNNN)", (unsigned long) num_edges, left, right, parent, match, matrix);
+    if (ret == NULL) {
+        goto out;
+    }
+    left = NULL;
+    right = NULL;
+    parent = NULL;
+    match = NULL;
+    matrix = NULL;
+out:
+    if (cm_allocated) {
+        compressed_matrix_free(&cm);
+    }
+    Py_XDECREF(haplotype_array);
+    Py_XDECREF(left);
+    Py_XDECREF(right);
+    Py_XDECREF(parent);
+    Py_XDECREF(match);
+    Py_XDECREF(matrix);
     return ret;
 }
 
@@ -697,6 +814,10 @@ static PyGetSetDef AncestorMatcher_getsetters[] = {
 static PyMethodDef AncestorMatcher_methods[] = {
     { "find_path", (PyCFunction) AncestorMatcher_find_path, METH_VARARGS | METH_KEYWORDS,
         "Returns a best match path for the specified haplotype through the ancestors." },
+    { "viterbi_matrix", (PyCFunction) AncestorMatcher_viterbi_matrix,
+        METH_VARARGS | METH_KEYWORDS,
+        "Runs the Viterbi algorithm and also returns the compressed matrix of "
+        "normalised values and recombination flags." },
     { "forward_matrix", (PyCFunction) AncestorMatcher_forward_matrix,
         METH_VARARGS | METH_KEYWORDS,
         "Runs the forward algorithm and returns the compressed matrix arrays." },

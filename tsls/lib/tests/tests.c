@@ -152,6 +152,21 @@ test_forest_matching(void)
         &am, 2, 1, h, match, &path_length, left, right, parent);
     CU_ASSERT_EQUAL(ret, TSLS_ERR_BAD_SITE_RANGE);
 
+    /* Viterbi with the values recorded */
+    ret = compressed_matrix_alloc(&fm, 4, 1024);
+    CU_ASSERT_EQUAL_FATAL(ret, 0);
+    ret = ancestor_matcher_find_path_matrix(
+        &am, 0, 4, h, match, &path_length, left, right, parent, &fm);
+    CU_ASSERT_EQUAL_FATAL(ret, 0);
+    CU_ASSERT_EQUAL(path_length, 1);
+    CU_ASSERT_EQUAL(parent[0], 1);
+    for (j = 0; j < 4; j++) {
+        CU_ASSERT(fm.num_values[j] > 0);
+        CU_ASSERT(fm.flags[j] != NULL);
+        CU_ASSERT(fm.normalisation_factor[j] > 0);
+    }
+    compressed_matrix_free(&fm);
+
     ret = compressed_matrix_alloc(&fm, 4, 1024);
     CU_ASSERT_EQUAL_FATAL(ret, 0);
     ret = compressed_matrix_alloc(&bm, 4, 1024);

@@ -117,6 +117,8 @@ typedef struct {
     tsk_size_t *num_values;
     tsk_id_t **nodes;
     double **values;
+    /* For Viterbi, the recombination_required flag of each node */
+    int8_t **flags;
     tsi_blkalloc_t allocator;
 } compressed_matrix_t;
 
@@ -184,6 +186,10 @@ int ancestor_matcher_free(ancestor_matcher_t *self);
 int ancestor_matcher_find_path(ancestor_matcher_t *self, tsk_id_t start, tsk_id_t end,
     const allele_t *haplotype, allele_t *matched_haplotype, size_t *path_length,
     tsk_id_t *path_left, tsk_id_t *path_right, tsk_id_t *path_parent);
+int ancestor_matcher_find_path_matrix(ancestor_matcher_t *self, tsk_id_t start,
+    tsk_id_t end, const allele_t *haplotype, allele_t *matched_haplotype,
+    size_t *path_length, tsk_id_t *path_left, tsk_id_t *path_right,
+    tsk_id_t *path_parent, compressed_matrix_t *output);
 int ancestor_matcher_forward(ancestor_matcher_t *self, const allele_t *haplotype,
     compressed_matrix_t *output);
 int ancestor_matcher_backward(ancestor_matcher_t *self, const allele_t *haplotype,

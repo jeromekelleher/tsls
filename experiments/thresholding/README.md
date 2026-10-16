@@ -76,10 +76,9 @@ On the 10k sc2ts sub-ARG, exact Viterbi stores 312–1,248 nodes per site,
 but only **4–6 distinct values** per site. With 50 simulated samples, it
 stores 9.4 nodes for 4.4 distinct values.
 
-The tsinfer-style compression only removes a node's value if it equals its
-parent's. Siblings with the same value are kept separately, so most stored
-nodes repeat a few values. Thresholding changes values, not structure. The
-best any method achieved without loss was about a 2× smaller traceback:
+Thresholding changes values, not the structure of which nodes need their
+own value. The best any method achieved without loss was about a 2×
+smaller traceback:
 
 | sc2ts 10k, Viterbi | traceback vs exact | time vs exact | log-likelihood loss | identical paths |
 |---|---|---|---|---|
@@ -90,8 +89,11 @@ best any method achieved without loss was about a 2× smaller traceback:
 | `floor` = 1e-2 | 0.44 | 0.36 | 1.5 | 1/3 |
 | `relative` = 1e-2 | 0.44 | 0.34 | 5.9 | 1/3 |
 
-Merging equal-valued siblings, which is closer to tskit's parsimony step but
-cheaper, looks like the larger opportunity.
+**Correction.** An earlier version of this README suggested merging
+siblings with equal values. That is not possible: every node in the tree is
+a state with its own value, so the engine's list is already the minimum for
+its encoding. See `experiments/compression/` for an analysis of where the
+stored nodes come from.
 
 ### 2. For Viterbi, a floor above `t*` is harmful, and pruning should be used instead
 
@@ -139,6 +141,5 @@ earlier runs: with sc2ts settings, `t* = ρ ≈ 2.4e-6`.
 - **Forward/backward:** treat any thresholding as approximate. A floor
   around 1e-4 gives large speedups on sc2ts with small posterior error.
   Check the posterior total-variation distance for the intended use.
-- **Next step:** improve compression by merging siblings with equal values,
-  rather than adding more thresholding. Use `count_distinct=True` to measure
-  the potential gain.
+- **Next step:** see `experiments/compression/`, which captures the exact
+  per-site values and analyses alternative encodings.
