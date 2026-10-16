@@ -36,6 +36,40 @@ This step makes the ARG usable by both engines:
   tsinfer-hmm then uses the ARG as is, and node IDs are the same for
   both engines.
 
+### 1b. Make sub-ARGs (optional)
+
+```
+uv run python subargs.py data/sc2ts_bench.trees data/subargs
+```
+
+This writes a series of nested sub-ARGs for measuring how the engines
+scale with ARG size. The default sizes are 10k, 30k, 100k, 300k and 1M
+samples. Each sub-ARG is the ARG "as of" an earlier date: all nodes at
+least as old as a time cutoff.
+
+- Parts of the ARG that are no longer ancestral to any remaining sample
+  are pruned. These are ancestors that sc2ts only added later, along
+  with their descendants. tskit-hmm also requires every node in a tree
+  to have a sample below it.
+- All sites are kept, so any query set can be run against any sub-ARG.
+- Node IDs change, so each sub-ARG has a `.node_ids.npy` file giving
+  each node's ID in the full ARG. `queries.py` and `run.py` report node
+  IDs (`nodes`, `parents`) as full-ARG IDs, so they are comparable
+  across sub-ARGs.
+
+To measure scaling with a fixed set of queries, generate the queries
+from the smallest sub-ARG. Its samples are in every larger sub-ARG, so
+every query is valid for all of them:
+
+```
+uv run python queries.py data/subargs/sc2ts_bench_n10000.trees data/queries_scaling \
+    --num-nodes 10 --divergence 0,1,2,5,10 --num-recombinants 10
+for n in 10000 30000 100000 300000 1000000; do
+    uv run python run.py data/subargs/sc2ts_bench_n$n.trees data/queries_scaling \
+        -o results/scaling_n$n.csv
+done
+```
+
 ### 2. Generate queries
 
 ```
@@ -124,6 +158,73 @@ pass, derived from the normalisation factors. If it differs from
   `test_agree_internal_samples`.
 - Both packages build with `NDEBUG` undefined, so C assertions are
   active during timing.
-- Matching against the full sc2ts ARG is slow. tsinfer takes about
-  2–3 minutes and 3–7 GB per query, which matches tsinfer 0.5.1 as used
-  by sc2ts. tskit is slower still. Use `--limit` to try things out.
+- Matching against the full sc2ts ARG is slow; see the findings below.
+  Use `--limit` and the sub-ARGs to try things out.
+
+## Findings so far (October 2026)
+
+These are partial, exploratory results. The runs shared a 4-core machine
+with other jobs, so treat absolute times as rough. The scaling queries
+are the 110 queries from the sub-ARG section (10 nodes, k = 0, 1, 2, 5,
+10, and 10 recombinants of each type with k = 0, 2, 5), run with
+`--num-mismatches 3`.
+
+| engine | samples | queries run | mean time | max time | mean memory | mean traceback size |
+|---|---|---|---|---|---|---|
+| tsinfer | 10k | 110 | 0.56s | 1.1s | 64 MB | 908 |
+| tsinfer | 30k | 110 | 2.8s | 5.1s | 204 MB | 2,813 |
+| tsinfer | 100k | 52 | 7.1s | 12.6s | 560 MB | 5,106 |
+| tsinfer | 3.1M (full) | 4 | 130–157s | 201s | 3.2–6.3 GB | 22k–45k |
+| tskit | 10k | 26 | 46s | 69s | | |
+| tskit | 3.1M (full) | 0 | none finished in 15 minutes | | | |
+
+### tsinfer-hmm
+
+- Time grows faster than linearly with ARG size: about 5× from 10k to
+  30k samples, and 2.5× from 30k to 100k. Memory and traceback size grow
+  roughly in step with time.
+- Time hardly depends on the query. Divergence (k = 0–10) makes no
+  difference, and recombinants take only about 10% longer than copies.
+  The cost is set by the ARG, not by the query.
+- On the full ARG, tsinfer 0.5.1 (as used by sc2ts) chooses the same
+  parents, with the same traceback size and memory, and takes 175–180s
+  per query. The cost is therefore inherent to the algorithm, not
+  something introduced by the multiallelic extension.
+- An sc2ts-style likelihood threshold of 5 mismatches reduced time only
+  modestly (to about 125–140s per query) and did not reduce memory.
+- The paths are as expected. Copy queries give one segment with exactly
+  k mismatches. Recombinants average 1.0–1.5 more mismatches than k and
+  mostly a single segment: with `--num-mismatches 3`, a segment with
+  only 2–3 informative sites is cheaper to explain with mismatches than
+  with a recombination.
+
+### tskit-hmm
+
+- At 10k samples it is about 80× slower than tsinfer, and on the full
+  ARG it did not finish a single query.
+- It gives suboptimal results on sc2ts ARGs, where about 11% of samples
+  are internal nodes. At 10k samples it was worse than tsinfer on 10 of
+  the 26 queries compared, always by exactly one mismatch, including
+  exact copies (k = 0). It was never better. There are two separate
+  failures:
+  - Forward pass. When the source is an internal sample (for example
+    query 0), the optimum implied by the normalisation factors is
+    already one mismatch worse than an exact copy that is available.
+  - Traceback. When the source is a leaf (for example query 20), the
+    forward pass optimum is correct, but the traceback returns a path
+    one mismatch worse. This happened on 5 of the 26 queries.
+
+  When all samples are leaves, the two engines agree exactly. The
+  failures are reproduced by `test_agree_internal_samples`.
+- It aborts with a C assertion (`lib/haplotype_matching.c:349`) if a tree
+  contains a node with no samples below it. `subargs.py` prunes such
+  ancestry.
+
+### Implications
+
+- tskit-hmm is not usable as a reference on sc2ts-style ARGs until the
+  internal-sample bugs are fixed.
+- For tsinfer-hmm, the main targets are memory and traceback size on
+  large ARGs.
+- For clean timings, run sub-ARGs up to about 300k samples one at a time.
+  Restrict tskit to the smallest sub-ARGs with `--limit`.

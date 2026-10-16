@@ -5,16 +5,17 @@ import pytest
 import engines
 import prepare
 import queries
+import subargs
 
 
-def simulate_sc2ts_like(seed):
+def simulate_sc2ts_like(seed, samples=30):
     """
     Simulate a small haploid ARG with JC69 mutations, with the sc2ts root
     structure: an isolated vestigial node 0 and node 1 as the root of every
     tree.
     """
     ts = msprime.sim_ancestry(
-        30,
+        samples,
         ploidy=1,
         sequence_length=200,
         recombination_rate=1e-3,
@@ -258,6 +259,96 @@ class TestEnginesAgree:
             optimum = stats["optimum_log_likelihood"]
             assert tsinfer_value == pytest.approx(optimum, rel=1e-6)
             assert tskit_value == pytest.approx(optimum, rel=1e-6)
+
+
+@pytest.fixture(scope="module")
+def serial_ts():
+    """
+    A benchmark ARG with samples taken at several times, like sc2ts.
+    """
+    samples = [msprime.SampleSet(8, ploidy=1, time=t) for t in [0, 0.5, 1, 1.5]]
+    ts, _ = prepare.prepare(simulate_sc2ts_like(42, samples=samples))
+    return ts
+
+
+class TestSubArgs:
+    @pytest.mark.parametrize("num_samples", [1, 8, 16, 24, 32])
+    def test_time_cutoff(self, serial_ts, num_samples):
+        min_time = subargs.time_cutoff(serial_ts, num_samples)
+        sub_ts, _ = subargs.sub_arg(serial_ts, min_time)
+        assert sub_ts.num_samples >= num_samples
+        assert np.all(sub_ts.nodes_time >= min_time)
+
+    def test_too_many_samples(self, serial_ts):
+        with pytest.raises(ValueError, match="Only"):
+            subargs.time_cutoff(serial_ts, serial_ts.num_samples + 1)
+
+    @pytest.mark.parametrize("min_time", [0, 0.5, 1, 1.5])
+    def test_haplotypes_unchanged(self, serial_ts, min_time):
+        sub_ts, node_ids = subargs.sub_arg(serial_ts, min_time)
+        assert sub_ts.num_sites == serial_ts.num_sites
+        np.testing.assert_array_equal(serial_ts.nodes_time[node_ids], sub_ts.nodes_time)
+        np.testing.assert_array_equal(
+            serial_ts.nodes_flags[node_ids], sub_ts.nodes_flags
+        )
+        # Non-sample nodes lose mutations in regions that are no longer
+        # ancestral to any sample, so only sample haplotypes are unchanged.
+        samples = sub_ts.samples()
+        assert np.all(serial_ts.nodes_time[serial_ts.samples()] >= min_time) == (
+            len(samples) == serial_ts.num_samples
+        )
+        np.testing.assert_array_equal(
+            queries.node_haplotypes(sub_ts, samples),
+            queries.node_haplotypes(serial_ts, node_ids[samples]),
+        )
+        for tree in sub_ts.trees():
+            assert tree.root == 0
+            assert list(tree.children(0)) == [1]
+            # Every node in a tree has samples below it
+            for u in tree.nodes():
+                assert tree.num_samples(u) > 0
+
+    def test_full_cutoff_is_identity(self, serial_ts):
+        sub_ts, node_ids = subargs.sub_arg(serial_ts, 0)
+        np.testing.assert_array_equal(node_ids, np.arange(serial_ts.num_nodes))
+        sub_ts.tables.assert_equals(serial_ts.tables, ignore_provenance=True)
+
+    def test_node_ids_round_trip(self, serial_ts, tmp_path):
+        sub_ts, node_ids = subargs.sub_arg(serial_ts, 1)
+        path = tmp_path / "sub.trees"
+        sub_ts.dump(path)
+        np.testing.assert_array_equal(
+            subargs.load_node_ids(path, sub_ts), np.arange(sub_ts.num_nodes)
+        )
+        np.save(subargs.node_ids_path(path), node_ids)
+        np.testing.assert_array_equal(subargs.load_node_ids(path, sub_ts), node_ids)
+
+    def test_queries_report_original_ids(self, serial_ts):
+        sub_ts, node_ids = subargs.sub_arg(serial_ts, 1)
+        query_set = queries.make_queries(
+            sub_ts,
+            seed=1,
+            num_nodes=4,
+            divergence=(0,),
+            num_recombinants=2,
+            recombinant_divergence=(0,),
+            node_ids=node_ids,
+        )
+        for row, h in zip(query_set.rows, query_set.haplotypes):
+            nodes = queries.parse_list(row["nodes"])
+            source = queries.node_haplotypes(serial_ts, nodes)
+            if row["kind"] == "copy":
+                np.testing.assert_array_equal(h, source[0])
+
+    @pytest.mark.parametrize("name", list(engines.ENGINES))
+    def test_engines_run(self, serial_ts, name):
+        sub_ts, _ = subargs.sub_arg(serial_ts, 1)
+        mu, rho = engines.solve_num_mismatches(3)
+        engine = engines.ENGINES[name](sub_ts, mu=mu, rho=rho)
+        for h in queries.node_haplotypes(sub_ts, sub_ts.samples()):
+            left, right, parent, _, _ = engine.match(h)
+            matched = engines.path_haplotype(sub_ts, left, right, parent)
+            np.testing.assert_array_equal(matched, h)
 
 
 class TestParameters:

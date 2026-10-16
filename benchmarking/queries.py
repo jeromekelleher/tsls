@@ -10,7 +10,8 @@ int8 indexes into ALLELES (-1 is missing data). There are two kinds:
   one (A|B) or two (A|B|A) breakpoints, with k random mutations applied.
 
 Each query has a row of metadata recording how it was made, so that
-we can compare the engines' paths with the truth.
+we can compare the engines' paths with the truth. Node IDs in the
+metadata are original IDs if the ARG is a sub-ARG (see subargs.py).
 """
 
 import dataclasses
@@ -20,6 +21,8 @@ import click
 import numpy as np
 import pandas as pd
 import tskit
+
+import subargs
 
 ALLELES = ("A", "C", "G", "T")
 MISSING = -1
@@ -124,8 +127,16 @@ class QuerySet:
     """
 
     positions: np.ndarray
+    # The original node ID of each node, if the ARG is a sub-ARG
+    node_ids: np.ndarray = None
     haplotypes: list = dataclasses.field(default_factory=list)
     rows: list = dataclasses.field(default_factory=list)
+
+    def format_nodes(self, nodes):
+        nodes = np.asarray(nodes)
+        if self.node_ids is not None:
+            nodes = self.node_ids[nodes]
+        return format_list(nodes)
 
     def add(self, h, **metadata):
         row = {column: "" for column in QUERY_COLUMNS}
@@ -168,7 +179,7 @@ def add_copy_queries(query_set, ts, rng, *, num_nodes, divergence):
             query_set.add(
                 hq,
                 kind="copy",
-                nodes=format_list([node]),
+                nodes=query_set.format_nodes([node]),
                 k=k,
                 mutated_sites=format_list(sites),
             )
@@ -209,7 +220,7 @@ def add_recombinant_queries(
             query_set.add(
                 hq,
                 kind="recombinant",
-                nodes=format_list(pair),
+                nodes=query_set.format_nodes(pair),
                 k=k,
                 mutated_sites=format_list(sites),
                 breakpoints=format_list(breakpoints),
@@ -235,9 +246,10 @@ def make_queries(
     num_breakpoints=(1, 2),
     recombinant_divergence=(0, 2, 5),
     min_segment_diffs=2,
+    node_ids=None,
 ):
     rng = np.random.default_rng(seed)
-    query_set = QuerySet(positions=ts.sites_position.copy())
+    query_set = QuerySet(positions=ts.sites_position.copy(), node_ids=node_ids)
     add_copy_queries(query_set, ts, rng, num_nodes=num_nodes, divergence=divergence)
     for nb in num_breakpoints:
         add_recombinant_queries(
@@ -337,6 +349,7 @@ def main(
     OUT_DIR.
     """
     ts = tskit.load(ts_path)
+    node_ids = subargs.load_node_ids(ts_path, ts)
     query_set = make_queries(
         ts,
         seed=seed,
@@ -346,6 +359,7 @@ def main(
         num_breakpoints=num_breakpoints,
         recombinant_divergence=recombinant_divergence,
         min_segment_diffs=min_segment_diffs,
+        node_ids=node_ids,
     )
     query_set.save(out_dir)
     df = query_set.dataframe()

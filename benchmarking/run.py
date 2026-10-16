@@ -19,6 +19,7 @@ from tqdm import tqdm
 
 import engines
 import queries
+import subargs
 
 RESULT_COLUMNS = [
     "query_id",
@@ -56,11 +57,13 @@ def completed_pairs(out_path):
     return set(zip(df.query_id, df.engine))
 
 
-def summarise_match(ts, h, result, mu, rho):
+def summarise_match(ts, node_ids, h, result, mu, rho):
     """
     Return the result row fields describing the specified match. The log
     likelihood is computed under the unweighted model with the specified
-    parameters, so that it is comparable between engines.
+    parameters, so that it is comparable between engines. Parents are
+    reported as original node IDs, so that they are comparable between
+    sub-ARGs.
     """
     left, right, parent, matched, stats = result
     if matched is None:
@@ -69,7 +72,7 @@ def summarise_match(ts, h, result, mu, rho):
     log_likelihood = engines.path_log_likelihood(h, len(parent), matched, mu, rho)
     return {
         "num_segments": len(parent),
-        "parents": queries.format_list(parent),
+        "parents": queries.format_list(node_ids[parent]),
         "breakpoints": queries.format_list(left[1:]),
         "num_mismatches": int(np.sum(h[non_missing] != matched[non_missing])),
         "log_likelihood": log_likelihood,
@@ -120,6 +123,7 @@ def main(
     at TS_PATH.
     """
     ts = load_ts(ts_path)
+    node_ids = subargs.load_node_ids(ts_path, ts)
     H, positions, df = queries.load_queries(query_dir)
     if not np.array_equal(positions, ts.sites_position):
         raise ValueError("Query sites do not match the tree sequence")
@@ -171,7 +175,7 @@ def main(
                 row["wall_time"] = time.perf_counter() - wall_before
                 row["cpu_time"] = time.thread_time() - cpu_before
                 if row["status"] == "ok":
-                    row.update(summarise_match(ts, h, result, mu, rho))
+                    row.update(summarise_match(ts, node_ids, h, result, mu, rho))
                 writer.writerow(row)
                 f.flush()
 
