@@ -99,6 +99,22 @@ get_allelic_state(const allele_t *restrict allelic_state,
     return allelic_state[u];
 }
 
+/* As get_allelic_state, but for a tree in which every root has its
+ * allelic state set (see ancestor_matcher_set_root_allelic_state), so the
+ * walk up the tree doesn't need to check for the root. This is the
+ * innermost loop of the matcher, so there is deliberately no assert here
+ * (the Python module is compiled with asserts on); the roots are checked
+ * in ancestor_matcher_check_state. */
+static inline allele_t
+get_marked_allelic_state(
+    const allele_t *restrict allelic_state, const tsk_id_t *restrict parent, tsk_id_t u)
+{
+    while (allelic_state[u] == TSK_NULL) {
+        u = parent[u];
+    }
+    return allelic_state[u];
+}
+
 static inline bool
 is_integer(double x)
 {
@@ -984,6 +1000,74 @@ ancestor_matcher_next_tree(
     }
 }
 
+/* Move to the next tree in the direction of travel, updating only the tree
+ * topology. This is the same as ancestor_matcher_next_tree with
+ * update_likelihoods false when num_below isn't tracked, but avoids its
+ * per-edge bookkeeping. It is used to build the first tree of a sweep,
+ * which may mean processing most of the edges. */
+static void
+ancestor_matcher_next_tree_topology(ancestor_matcher_t *self, tree_position_t *tp)
+{
+    const matcher_indexes_t *mi = self->matcher_indexes;
+    const int_fast32_t M = (int_fast32_t) mi->num_edges;
+    const coordinate_t sequence_length = mi->sites.position[mi->num_sites];
+    const edge_t *restrict left_index = mi->left_index_edges;
+    const edge_t *restrict right_index = mi->right_index_edges;
+    tsk_id_t *restrict parent = self->parent;
+    tsk_id_t *restrict left_child = self->left_child;
+    tsk_id_t *restrict right_child = self->right_child;
+    tsk_id_t *restrict left_sib = self->left_sib;
+    tsk_id_t *restrict right_sib = self->right_sib;
+    int_fast32_t in_index = tp->in_index;
+    int_fast32_t out_index = tp->out_index;
+    coordinate_t pos;
+
+    assert(!self->track_num_below);
+    if (tp->direction > 0) {
+        pos = tp->right;
+        while (out_index < M && right_index[out_index].right == pos) {
+            remove_edge(right_index[out_index], parent, left_child, right_child,
+                left_sib, right_sib);
+            out_index++;
+        }
+        while (in_index < M && left_index[in_index].left == pos) {
+            insert_edge(left_index[in_index], parent, left_child, right_child, left_sib,
+                right_sib);
+            in_index++;
+        }
+        tp->left = pos;
+        tp->right = sequence_length;
+        if (in_index < M) {
+            tp->right = TSK_MIN(tp->right, left_index[in_index].left);
+        }
+        if (out_index < M) {
+            tp->right = TSK_MIN(tp->right, right_index[out_index].right);
+        }
+    } else {
+        pos = tp->left;
+        while (out_index >= 0 && left_index[out_index].left == pos) {
+            remove_edge(left_index[out_index], parent, left_child, right_child,
+                left_sib, right_sib);
+            out_index--;
+        }
+        while (in_index >= 0 && right_index[in_index].right == pos) {
+            insert_edge(right_index[in_index], parent, left_child, right_child,
+                left_sib, right_sib);
+            in_index--;
+        }
+        tp->right = pos;
+        tp->left = 0;
+        if (out_index >= 0) {
+            tp->left = TSK_MAX(tp->left, left_index[out_index].left);
+        }
+        if (in_index >= 0) {
+            tp->left = TSK_MAX(tp->left, right_index[in_index].right);
+        }
+    }
+    tp->in_index = in_index;
+    tp->out_index = out_index;
+}
+
 /* Reset the matcher and build the tree containing the specified position,
  * giving each root the specified initial likelihood. */
 static void
@@ -1001,13 +1085,21 @@ ancestor_matcher_init_sweep(ancestor_matcher_t *self, tree_position_t *tp,
     memset(self->right_sib, 0xff, N * sizeof(*self->right_sib));
     memset(self->recombination_required, 0xff, N * sizeof(*self->recombination_required));
     for (j = 0; j < N; j++) {
-        self->num_below[j] = 1;
         self->likelihood_cache[j] = CACHE_UNSET;
     }
     tree_position_init(tp, self->matcher_indexes, direction);
-    do {
-        ancestor_matcher_next_tree(self, tp, false);
-    } while (!(tp->left <= position && position < tp->right));
+    if (self->track_num_below) {
+        for (j = 0; j < N; j++) {
+            self->num_below[j] = 1;
+        }
+        do {
+            ancestor_matcher_next_tree(self, tp, false);
+        } while (!(tp->left <= position && position < tp->right));
+    } else {
+        do {
+            ancestor_matcher_next_tree_topology(self, tp);
+        } while (!(tp->left <= position && position < tp->right));
+    }
 
     self->num_likelihood_nodes = 0;
     for (u = 0; u < (tsk_id_t) N; u++) {
@@ -1040,6 +1132,47 @@ ancestor_matcher_unset_allelic_state(ancestor_matcher_t *self, const tsk_id_t si
     for (mutation = self->matcher_indexes->sites.mutations[site]; mutation != NULL;
         mutation = mutation->next) {
         self->allelic_state[mutation->node] = TSK_NULL;
+    }
+}
+
+/* Set the allelic state of every root to the ancestral state, so that
+ * get_marked_allelic_state finds a state for every node in the tree.
+ * Every root has a likelihood, so the roots are found in the likelihood
+ * list. This must be called before ancestor_matcher_set_allelic_state, so
+ * that mutations above a root take precedence, and the likelihood list
+ * must not change before ancestor_matcher_unset_root_allelic_state. */
+static inline void
+ancestor_matcher_set_root_allelic_state(ancestor_matcher_t *self, const tsk_id_t site)
+{
+    const allele_t ancestral_state = self->matcher_indexes->sites.ancestral_state[site];
+    const tsk_id_t *restrict L_nodes = self->likelihood_nodes;
+    const tsk_id_t *restrict parent = self->parent;
+    allele_t *restrict allelic_state = self->allelic_state;
+    tsk_id_t u;
+    int j;
+
+    for (j = 0; j < self->num_likelihood_nodes; j++) {
+        u = L_nodes[j];
+        if (parent[u] == NULL_NODE) {
+            allelic_state[u] = ancestral_state;
+        }
+    }
+}
+
+static inline void
+ancestor_matcher_unset_root_allelic_state(ancestor_matcher_t *self)
+{
+    const tsk_id_t *restrict L_nodes = self->likelihood_nodes;
+    const tsk_id_t *restrict parent = self->parent;
+    allele_t *restrict allelic_state = self->allelic_state;
+    tsk_id_t u;
+    int j;
+
+    for (j = 0; j < self->num_likelihood_nodes; j++) {
+        u = L_nodes[j];
+        if (parent[u] == NULL_NODE) {
+            allelic_state[u] = TSK_NULL;
+        }
     }
 }
 
@@ -1308,7 +1441,6 @@ ancestor_matcher_process_site_viterbi(ancestor_matcher_t *self, const tsk_id_t s
     const tsk_id_t *restrict L_nodes = self->likelihood_nodes;
     const tsk_id_t *restrict parent = self->parent;
     const allele_t *restrict allelic_state = self->allelic_state;
-    const allele_t ancestral_state = self->matcher_indexes->sites.ancestral_state[site];
     double *restrict L = self->likelihood;
     int8_t *restrict recombination_required = self->recombination_required;
     const double rho = self->recombination_rate[site];
@@ -1320,6 +1452,7 @@ ancestor_matcher_process_site_viterbi(ancestor_matcher_t *self, const tsk_id_t s
     int j;
 
     ancestor_matcher_insert_mutation_likelihoods(self, site);
+    ancestor_matcher_set_root_allelic_state(self, site);
     ancestor_matcher_set_allelic_state(self, site);
     max_L = -1;
     max_L_node = NULL_NODE;
@@ -1335,8 +1468,7 @@ ancestor_matcher_process_site_viterbi(ancestor_matcher_t *self, const tsk_id_t s
             recombination_required[u] = true;
         }
         p_e = emission_probability(
-            get_allelic_state(allelic_state, parent, u, ancestral_state), state, mu,
-            num_alleles);
+            get_marked_allelic_state(allelic_state, parent, u), state, mu, num_alleles);
         L[u] = p_t * p_e;
         if (L[u] > max_L) {
             max_L = L[u];
@@ -1344,6 +1476,7 @@ ancestor_matcher_process_site_viterbi(ancestor_matcher_t *self, const tsk_id_t s
         }
     }
     ancestor_matcher_unset_allelic_state(self, site);
+    ancestor_matcher_unset_root_allelic_state(self);
     (void) num_likelihood_nodes;
 
     if (max_L <= 0) {
@@ -1395,7 +1528,6 @@ ancestor_matcher_process_site_forward(ancestor_matcher_t *self, const tsk_id_t s
     const tsk_id_t *restrict L_nodes = self->likelihood_nodes;
     const tsk_id_t *restrict parent = self->parent;
     const allele_t *restrict allelic_state = self->allelic_state;
-    const allele_t ancestral_state = self->matcher_indexes->sites.ancestral_state[site];
     double *restrict L = self->likelihood;
     const double rho = self->recombination_rate[site];
     const double mu = self->mismatch_rate[site];
@@ -1411,15 +1543,16 @@ ancestor_matcher_process_site_forward(ancestor_matcher_t *self, const tsk_id_t s
     if (total < 0) {
         total = ancestor_matcher_total_likelihood(self);
     }
+    ancestor_matcher_set_root_allelic_state(self, site);
     ancestor_matcher_set_allelic_state(self, site);
     for (j = 0; j < self->num_likelihood_nodes; j++) {
         u = L_nodes[j];
         p_e = emission_probability(
-            get_allelic_state(allelic_state, parent, u, ancestral_state), state, mu,
-            num_alleles);
+            get_marked_allelic_state(allelic_state, parent, u), state, mu, num_alleles);
         L[u] = (L[u] * (1 - rho) + rho / n * total) * p_e;
     }
     ancestor_matcher_unset_allelic_state(self, site);
+    ancestor_matcher_unset_root_allelic_state(self);
     normalisation_factor = ancestor_matcher_total_likelihood(self);
     if (!(normalisation_factor > 0)) {
         ret = TSLS_ERR_MATCH_IMPOSSIBLE;
@@ -1461,7 +1594,6 @@ ancestor_matcher_process_site_backward(ancestor_matcher_t *self, const tsk_id_t 
     const tsk_id_t *restrict L_nodes = self->likelihood_nodes;
     const tsk_id_t *restrict parent = self->parent;
     const allele_t *restrict allelic_state = self->allelic_state;
-    const allele_t ancestral_state = self->matcher_indexes->sites.ancestral_state[site];
     double *restrict L = self->likelihood;
     const double mu = self->mismatch_rate[site];
     const double n = ancestor_matcher_get_n(self);
@@ -1486,14 +1618,15 @@ ancestor_matcher_process_site_backward(ancestor_matcher_t *self, const tsk_id_t 
         goto out;
     }
     ancestor_matcher_compute_num_inheriting(self);
+    ancestor_matcher_set_root_allelic_state(self, site);
     ancestor_matcher_set_allelic_state(self, site);
     for (j = 0; j < self->num_likelihood_nodes; j++) {
         u = L_nodes[j];
         L[u] *= emission_probability(
-            get_allelic_state(allelic_state, parent, u, ancestral_state), state, mu,
-            num_alleles);
+            get_marked_allelic_state(allelic_state, parent, u), state, mu, num_alleles);
     }
     ancestor_matcher_unset_allelic_state(self, site);
+    ancestor_matcher_unset_root_allelic_state(self);
     transition->pending = true;
     transition->total = ancestor_matcher_total_likelihood(self);
     transition->rho = self->recombination_rate[site];

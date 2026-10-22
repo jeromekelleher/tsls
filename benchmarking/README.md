@@ -363,10 +363,84 @@ for the whole group divided by the number of haplotypes.
   not yet in the tree sequence.
 - tsls is 3–10% slower than tsinfer-hmm in mean time per query, with the
   same matcher memory (64 MiB for ancestors, about 90 MiB for samples)
-  and traceback sizes. Building tsls's `MatcherIndexes` takes several
+  and traceback sizes. (These figures predate the engine changes
+  described below, and `run.py` timings are biased by run order; see
+  [tsls against tsinfer-hmm](#tsls-against-tsinfer-hmm-where-the-time-goes).)
+  Building tsls's `MatcherIndexes` takes several
   times longer (3.6 s against 0.4 s for the full ancestors tree
   sequence), but this is done once per group.
 - Per-query times are close to tsinfer's per-haplotype CPU time, so the
   HMM accounts for most of tsinfer's matching cost.
 - The cost is in the last few ancestor groups and the samples. Matching
   all 6,404 samples takes about 4.5 CPU hours with either engine.
+
+### tsls against tsinfer-hmm: where the time goes
+
+tsls now stores a smaller Viterbi traceback than tsinfer-hmm (13 against
+21 entries per site for samples; see `experiments/compression/README.md`),
+but it isn't faster, because storing the traceback is under 1% of the
+time in both engines. Both engines update the same likelihood lists at
+each site, since tsinfer-hmm coalesces them right after storing. The time
+goes into walking up the tree, to find each listed node's allele and the
+value it inherits, and into moving from tree to tree. Building the first
+tree of a query means processing most of the edges before its window,
+which matters for late ancestors.
+
+Instruction counts (callgrind, collection limited to
+`ancestor_matcher_find_path`, 20 group 1485 ancestors and 1 sample) showed
+where tsls did more work:
+
+| | tsinfer-hmm | tsls before | tsls after |
+|---|---|---|---|
+| 20 ancestors, group 1485 | 6.65 G | 9.89 G | 7.44 G |
+| 1 sample | 9.92 G | 12.50 G | 10.96 G |
+
+Two changes to `tsls/lib/matcher.c` account for the difference between
+"before" and "after":
+
+1. **Allele lookup.** tsinfer-hmm's trees have the single root 0, whose
+   allele it sets to the ancestral state, so the walk up the tree only
+   checks for a set allele. tsls allows several roots, so
+   `get_allelic_state` also checked for the root at each step. tsls now
+   sets every root's allele to the ancestral state before the site's
+   update (the roots all have likelihoods, so they are found in the
+   likelihood list), and the three likelihood loops use
+   `get_marked_allelic_state`, which walks without the check. The walk
+   deliberately has no `assert`: the Python module is compiled with
+   asserts on, and an `assert` there cost as much as the check it
+   replaced (12.71 G on the sample, against 12.50 G before). The traceback
+   keeps the general `get_allelic_state`, since its tree has no
+   likelihoods.
+2. **Building the first tree.** For Viterbi, `init_sweep` now builds the
+   first tree with plain edge insertions and removals
+   (`ancestor_matcher_next_tree_topology`), as tsinfer-hmm does, instead
+   of passing every edge through the general wrappers that handle
+   likelihoods, subtree counts and isolated nodes. It also no longer
+   initialises `num_below`, which only forward and backward use. Forward
+   and backward still build it the general way, because they track
+   `num_below`.
+
+Wall times, measured in pairs: each query is run three times with each
+engine, alternating, and the best time is kept. Ratios are total tsls time
+over total tsinfer-hmm time (100 group 1485 ancestors, 6 samples):
+
+| | tsls before ÷ tsinfer-hmm | tsls after ÷ tsinfer-hmm |
+|---|---|---|
+| ancestors, group 1485 | 1.35 | 1.10 |
+| samples | 1.06 | 1.06 |
+
+- Change 2 is a clear win on late ancestors.
+- Change 1 removes about 1.5 G instructions per sample but no wall time.
+  The walk up the tree is limited by memory access (each step loads
+  `allelic_state` and `parent` for a node that is usually not in cache),
+  so the extra compare was nearly free.
+- What is left is mostly the same kind of overhead in the coalescing and
+  cache code: `ancestor_matcher_get_inherited_likelihood` and
+  `ancestor_matcher_reset_likelihood_cache` have asserts and root checks
+  inside their walks, which tsinfer-hmm's equivalents don't. By the
+  result for change 1, these would also save instructions more than time.
+- Timing caveat: `run.py` runs all queries for one engine, then all for
+  the next, so drift in machine speed (large on this VM: the same query
+  can vary by 20% between passes) shows up as a difference between
+  engines. Ratios from `run.py` ranged from 1.09 to 1.25 on the same
+  builds. Use paired measurements, as above, to compare engines.
