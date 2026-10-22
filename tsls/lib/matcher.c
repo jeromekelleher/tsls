@@ -561,6 +561,8 @@ ancestor_matcher_alloc(ancestor_matcher_t *self,
     self->recombination_required
         = malloc((N + 1) * sizeof(*self->recombination_required));
     self->likelihood_cache = malloc((N + 1) * sizeof(*self->likelihood_cache));
+    self->recombination_required_cache
+        = malloc((N + 1) * sizeof(*self->recombination_required_cache));
     self->likelihood_nodes = malloc((N + 1) * sizeof(*self->likelihood_nodes));
     self->likelihood_nodes_tmp = malloc((N + 1) * sizeof(*self->likelihood_nodes_tmp));
     self->values_tmp = malloc((N + 1) * sizeof(*self->values_tmp));
@@ -571,6 +573,7 @@ ancestor_matcher_alloc(ancestor_matcher_t *self,
         || self->left_sib == NULL || self->right_sib == NULL || self->num_below == NULL
         || self->num_inheriting == NULL || self->recombination_required == NULL
         || self->likelihood == NULL || self->likelihood_cache == NULL
+        || self->recombination_required_cache == NULL
         || self->likelihood_nodes == NULL || self->likelihood_nodes_tmp == NULL
         || self->values_tmp == NULL || self->allelic_state == NULL) {
         ret = TSLS_ERR_NO_MEMORY;
@@ -613,6 +616,7 @@ ancestor_matcher_free(ancestor_matcher_t *self)
     tsi_safe_free(self->recombination_required);
     tsi_safe_free(self->likelihood);
     tsi_safe_free(self->likelihood_cache);
+    tsi_safe_free(self->recombination_required_cache);
     tsi_safe_free(self->likelihood_nodes);
     tsi_safe_free(self->likelihood_nodes_tmp);
     tsi_safe_free(self->values_tmp);
@@ -1063,12 +1067,57 @@ ancestor_matcher_insert_mutation_likelihoods(
     }
 }
 
-/* Remove likelihoods that are equal to the likelihood inherited from the
- * parent. */
-static void
-ancestor_matcher_coalesce_likelihoods(ancestor_matcher_t *self)
+/* As ancestor_matcher_get_inherited_likelihood, but also return the
+ * recombination_required flag that u inherits, caching it along the path
+ * with the likelihood. */
+static inline double
+ancestor_matcher_get_inherited_likelihood_and_flag(
+    ancestor_matcher_t *self, tsk_id_t u, int8_t *flag)
 {
+    const double *restrict L = self->likelihood;
+    const int8_t *restrict R = self->recombination_required;
+    double *restrict L_cache = self->likelihood_cache;
+    int8_t *restrict R_cache = self->recombination_required_cache;
+    const tsk_id_t *restrict parent = self->parent;
+    double value;
+    int8_t r;
+    tsk_id_t v;
+
+    v = u;
+    while (likely(L[v] == NULL_LIKELIHOOD) && likely(L_cache[v] == CACHE_UNSET)) {
+        v = parent[v];
+        assert(v != NULL_NODE);
+    }
+    if (L_cache[v] == CACHE_UNSET) {
+        value = L[v];
+        r = R[v];
+    } else {
+        value = L_cache[v];
+        r = R_cache[v];
+    }
+    assert(value >= 0);
+    v = u;
+    while (likely(L[v] == NULL_LIKELIHOOD) && likely(L_cache[v] == CACHE_UNSET)) {
+        L_cache[v] = value;
+        R_cache[v] = r;
+        v = parent[v];
+    }
+    *flag = r;
+    return value;
+}
+
+/* Remove likelihoods that are equal to the likelihood inherited from the
+ * parent. If check_recombination_required is true, also require the
+ * recombination_required flag to equal the one inherited from the parent,
+ * so that the traceback, in which nodes inherit the flag of their nearest
+ * ancestor in the list, is unchanged. */
+static void
+ancestor_matcher_coalesce_likelihoods(
+    ancestor_matcher_t *self, bool check_recombination_required)
+{
+    const int8_t *restrict R = self->recombination_required;
     double L_p;
+    int8_t R_p;
     tsk_id_t u, p;
     double *restrict L = self->likelihood;
     const tsk_id_t *restrict parent = self->parent;
@@ -1085,9 +1134,19 @@ ancestor_matcher_coalesce_likelihoods(ancestor_matcher_t *self)
         if (p != NULL_NODE) {
             cached_paths[num_cached_paths] = p;
             num_cached_paths++;
-            L_p = ancestor_matcher_get_inherited_likelihood(self, p);
-            if (L[u] == L_p) {
-                L[u] = NULL_LIKELIHOOD;
+            if (check_recombination_required) {
+                /* A removed node had the inherited value and flag, so the
+                 * cached values below it stay valid. */
+                L_p = ancestor_matcher_get_inherited_likelihood_and_flag(
+                    self, p, &R_p);
+                if (L[u] == L_p && R[u] == R_p) {
+                    L[u] = NULL_LIKELIHOOD;
+                }
+            } else {
+                L_p = ancestor_matcher_get_inherited_likelihood(self, p);
+                if (L[u] == L_p) {
+                    L[u] = NULL_LIKELIHOOD;
+                }
             }
         }
         if (L[u] >= 0) {
@@ -1305,6 +1364,10 @@ ancestor_matcher_process_site_viterbi(ancestor_matcher_t *self, const tsk_id_t s
     }
     ancestor_matcher_prune(self);
     ancestor_matcher_count_distinct(self);
+    /* Remove redundant nodes before storing the traceback, keeping those
+     * whose recombination_required flag differs from the inherited one.
+     * Those are left for the next site, where their flags are recomputed. */
+    ancestor_matcher_coalesce_likelihoods(self, true);
     ret = ancestor_matcher_store_traceback(self, site);
     if (ret != 0) {
         goto out;
@@ -1316,7 +1379,6 @@ ancestor_matcher_process_site_viterbi(ancestor_matcher_t *self, const tsk_id_t s
             goto out;
         }
     }
-    ancestor_matcher_coalesce_likelihoods(self);
 out:
     return ret;
 }
@@ -1374,7 +1436,7 @@ ancestor_matcher_process_site_forward(ancestor_matcher_t *self, const tsk_id_t s
     if (ret != 0) {
         goto out;
     }
-    ancestor_matcher_coalesce_likelihoods(self);
+    ancestor_matcher_coalesce_likelihoods(self, false);
 out:
     return ret;
 }
@@ -1436,7 +1498,7 @@ ancestor_matcher_process_site_backward(ancestor_matcher_t *self, const tsk_id_t 
     transition->total = ancestor_matcher_total_likelihood(self);
     transition->rho = self->recombination_rate[site];
     transition->normalisation_factor = forward_normalisation_factor[site];
-    ancestor_matcher_coalesce_likelihoods(self);
+    ancestor_matcher_coalesce_likelihoods(self, false);
 out:
     return ret;
 }

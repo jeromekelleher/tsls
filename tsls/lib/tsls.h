@@ -147,6 +147,9 @@ typedef struct {
     int64_t *num_inheriting;
     double *likelihood;
     double *likelihood_cache;
+    /* The recombination_required flag inherited by each node, valid where
+     * likelihood_cache is set. Only filled when coalescing Viterbi. */
+    int8_t *recombination_required_cache;
     allele_t *allelic_state;
     int num_likelihood_nodes;
     /* At each site, record a node with the maximum likelihood. */
