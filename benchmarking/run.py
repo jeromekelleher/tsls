@@ -57,27 +57,31 @@ def completed_pairs(out_path):
     return set(zip(df.query_id, df.engine))
 
 
-def summarise_match(ts, node_ids, h, result, mu, rho):
+def summarise_match(ts, node_ids, h, result, mu, rho, *, log_likelihood=True):
     """
     Return the result row fields describing the specified match. The log
     likelihood is computed under the unweighted model with the specified
-    parameters, so that it is comparable between engines. Parents are
-    reported as original node IDs, so that they are comparable between
-    sub-ARGs.
+    parameters, so that it is comparable between engines; it is left empty
+    if log_likelihood is False. Parents are reported as original node IDs,
+    so that they are comparable between sub-ARGs.
     """
     left, right, parent, matched, stats = result
     if matched is None:
         matched = engines.path_haplotype(ts, left, right, parent)
     non_missing = h != queries.MISSING
-    log_likelihood = engines.path_log_likelihood(h, len(parent), matched, mu, rho)
-    return {
+    row = {
         "num_segments": len(parent),
         "parents": queries.format_list(node_ids[parent]),
         "breakpoints": queries.format_list(left[1:]),
         "num_mismatches": int(np.sum(h[non_missing] != matched[non_missing])),
-        "log_likelihood": log_likelihood,
+        "log_likelihood": "",
         "stats": " ".join(f"{key}={value}" for key, value in stats.items()),
     }
+    if log_likelihood:
+        row["log_likelihood"] = engines.path_log_likelihood(
+            h, len(parent), matched, mu, rho
+        )
+    return row
 
 
 @click.command()
@@ -89,16 +93,14 @@ def summarise_match(ts, node_ids, h, result, mu, rho):
     "engine_names",
     type=click.Choice(list(engines.ENGINES)),
     multiple=True,
-    default=list(engines.ENGINES),
-    show_default=True,
+    help="Engines to run (default: all, or tsinfer and tsls with a model.json)",
 )
 @click.option("-o", "--output", type=click.Path(dir_okay=False), required=True)
 @click.option(
     "--num-mismatches",
     type=int,
-    default=3,
-    show_default=True,
-    help="Number of mismatches equivalent to one recombination",
+    default=None,
+    help="Number of mismatches equivalent to one recombination [default: 3]",
 )
 @click.option(
     "--mismatch-threshold",
@@ -121,7 +123,32 @@ def main(
     """
     Run the HMM engines on the queries in QUERY_DIR against the benchmark ARG
     at TS_PATH.
+
+    If QUERY_DIR contains a model.json (as made by tsinfer_data.py), its
+    parameters are used instead of --num-mismatches, and the tskit engine,
+    which cannot use them, is not available.
     """
+    model = queries.load_model(query_dir)
+    engine_options = {}
+    if model is None:
+        if len(engine_names) == 0:
+            engine_names = list(engines.ENGINES)
+        if num_mismatches is None:
+            num_mismatches = 3
+        mu, rho = engines.solve_num_mismatches(num_mismatches)
+    else:
+        if len(engine_names) == 0:
+            engine_names = ["tsinfer", "tsls"]
+        if "tskit" in engine_names:
+            raise click.UsageError("The tskit engine does not support model.json")
+        if num_mismatches is not None:
+            raise click.UsageError("--num-mismatches cannot be used with model.json")
+        mu = model["mu"]
+        rho = model["rho"]
+        engine_options = {
+            "weight_by_n": model["weight_by_n"],
+            "alleles": model["alleles"],
+        }
     ts = load_ts(ts_path)
     node_ids = subargs.load_node_ids(ts_path, ts)
     H, positions, df = queries.load_queries(query_dir)
@@ -137,7 +164,6 @@ def main(
     done = completed_pairs(out_path)
     write_header = len(done) == 0
 
-    mu, rho = engines.solve_num_mismatches(num_mismatches)
     with open(out_path, "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=RESULT_COLUMNS)
         if write_header:
@@ -150,11 +176,13 @@ def main(
             options = {}
             if name in ("tsinfer", "tsls"):
                 options["mismatch_threshold"] = mismatch_threshold
+                options.update(engine_options)
             engine = engines.ENGINES[name](ts, mu=mu, rho=rho, **options)
             setup_time = time.perf_counter() - before
             click.echo(f"Set up {name} in {setup_time:.2f}s")
             for query_id in tqdm(todo, desc=name):
                 h = H[query_id]
+                start, end = queries.query_window(H, query_id)
                 row = {
                     "query_id": query_id,
                     "engine": name,
@@ -167,7 +195,10 @@ def main(
                 wall_before = time.perf_counter()
                 cpu_before = time.thread_time()
                 try:
-                    result = engine.match(h)
+                    if name == "tskit":
+                        result = engine.match(h)
+                    else:
+                        result = engine.match(h, start, end)
                 except Exception as e:  # noqa: BLE001 (record any failure)
                     row["status"] = f"{type(e).__name__}: {e}"
                 else:
@@ -175,7 +206,17 @@ def main(
                 row["wall_time"] = time.perf_counter() - wall_before
                 row["cpu_time"] = time.thread_time() - cpu_before
                 if row["status"] == "ok":
-                    row.update(summarise_match(ts, node_ids, h, result, mu, rho))
+                    row.update(
+                        summarise_match(
+                            ts,
+                            node_ids,
+                            h,
+                            result,
+                            mu,
+                            rho,
+                            log_likelihood=model is None,
+                        )
+                    )
                 writer.writerow(row)
                 f.flush()
 

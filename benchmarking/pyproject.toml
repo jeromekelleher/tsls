@@ -13,6 +13,8 @@ dependencies = [
     "tsinfer-hmm",
     "tskit-hmm",
     "tsls",
+    "zarr>=3.1",
+    "tabulate>=0.10.0",
 ]
 
 [dependency-groups]
