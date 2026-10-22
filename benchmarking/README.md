@@ -7,8 +7,10 @@ Benchmarks for the Li and Stephens HMM engines in tsls:
 
 Each engine runs Viterbi matching over a set of query haplotypes with
 known ground truth, and the results are recorded so the engines can be
-characterised across a range of queries. The first target is the sc2ts
-SARS-CoV-2 ARG. Benchmarks for ARGs inferred by tsinfer will follow.
+characterised across a range of queries. There are two targets: the
+sc2ts SARS-CoV-2 ARG, and the ancestor and sample matching phases of a
+tsinfer 1.0 inference of 1000 Genomes chr20p (see
+[below](#tsinfer-10-1000-genomes-chr20p)).
 
 ## Setup
 
@@ -228,3 +230,143 @@ are the 110 queries from the sub-ARG section (10 nodes, k = 0, 1, 2, 5,
   large ARGs.
 - For clean timings, run sub-ARGs up to about 300k samples one at a time.
   Restrict tskit to the smallest sub-ARGs with `--limit`.
+
+## tsinfer 1.0: 1000 Genomes chr20p
+
+These benchmarks replay the HMM calls of a real tsinfer 1.0 inference, so
+that the engines can be compared with tsinfer on the workloads it
+actually runs. The paths tsinfer found are the ground truth.
+
+### Data
+
+A colleague ran tsinfer at commit `cb5017e` on the 1000 Genomes high
+coverage chr20p (3,202 individuals, 580,909 inference sites), with the
+parameters in `full_inference.toml`: `rho = 0.01` and `mu = 1e-20` for
+both ancestors and samples, no path compression, and tsinfer's defaults
+of `weight_by_n=True` and no likelihood threshold. The data are copied
+from `tmp/for_jerome` to `data/tgp_chr20p/`, leaving out macOS metadata:
+
+```
+rsync -a --exclude '._*' --exclude .DS_Store ../tmp/for_jerome/ data/tgp_chr20p/
+```
+
+- `tgp_chr20p_inferred_ancestors.zarr`: the 432,851 ancestors.
+- `tgp_chr20p_inferred_ancestors.trees`: the ancestors tree sequence
+  (433k nodes, 4.2M edges).
+- `tgp_chr20p_samples_masked.zarr`: the sample genotypes.
+- `tgp_chr20p_inferred_samples_raw.trees`: the result of matching the
+  6,404 sample haplotypes, before post-processing.
+- `partial_ancestor_match/`: the tree sequence before group 84
+  (`before.trees`), the group's ancestors (`group.zarr`, `group.json`) and
+  the result (`after.trees`).
+
+See `data/tgp_chr20p/README.md` for details.
+
+### Workflow
+
+#### 1. Compute the match groups
+
+The tree sequences do not record which nodes were matched in which
+group, so we recompute the groups with tsinfer's own code. This step
+needs a tsinfer checkout at `../../tsinfer`, and runs in its environment
+so that tsinfer is not a dependency of the benchmarks:
+
+```
+uv run --project ../../tsinfer python tsinfer_groups.py data/tgp_chr20p
+```
+
+This writes `data/tgp_chr20p/match_jobs.csv`: 439,255 jobs in 1,487
+groups (groups 0–1485 for the ancestors, and group 1486 for the samples).
+It checks that the order of the ancestor jobs is the node order of the
+ancestors tree sequence, and that group 84 is the one in `group.json`.
+
+#### 2. Make workloads
+
+```
+uv run python tsinfer_data.py ancestors data/tgp_chr20p 1485 data/tgp_chr20p/ancestors_g1485 --num-queries 500
+uv run python tsinfer_data.py samples data/tgp_chr20p data/tgp_chr20p/samples --num-queries 200
+```
+
+- `ancestors GROUP`: the ancestors of one group (all of them by default),
+  matched against the tree sequence before the group. This is the
+  ancestors tree sequence cut at the group's first node: tsinfer adds
+  each group's nodes in order, and a node only copies from earlier
+  groups. For group 84 the result is identical to `before.trees`.
+- `samples`: a random subset of the sample haplotypes, matched against
+  the full ancestors tree sequence. The inference sites are selected from
+  the samples zarr with the config's include expression, then restricted
+  to the ancestor sites. Haplotypes are checked against the sample
+  genotypes in the matched tree sequence.
+
+Each workload directory holds `reference.trees`, the queries, a
+`model.json` with tsinfer's parameters, and `tsinfer_group.json` with the
+time and memory tsinfer recorded for the whole group. Haplotypes are
+encoded as in tsinfer (0 ancestral, 1 derived, -1 missing), and each
+query is matched over its window of non-missing sites, as tsinfer does.
+Queries are stored in a windowed format (`queries.WindowedHaplotypes`),
+because ancestors cover only a short stretch of the genome.
+`queries.csv` has the path tsinfer found (`truth_parents`,
+`truth_breakpoints`), taken from the edges of the query's node.
+
+#### 3. Run and summarise
+
+```
+uv run python run.py data/tgp_chr20p/ancestors_g1485/reference.trees \
+    data/tgp_chr20p/ancestors_g1485 -o results/tgp_chr20p_ancestors_g1485.csv
+uv run python tsinfer_summary.py \
+    results/tgp_chr20p_ancestors_g1485.csv data/tgp_chr20p/ancestors_g1485
+```
+
+When a workload has a `model.json`, `run.py` uses its parameters, runs
+the `tsinfer` and `tsls` engines by default, and leaves `log_likelihood`
+empty (the sc2ts formula does not apply with `weight_by_n=True`).
+`tsinfer_summary.py` takes any number of `RESULTS QUERY_DIR` pairs, and
+prints a markdown table.
+
+### Caveats
+
+- tskit-hmm cannot be used: the ancestors tree sequence has no samples,
+  and tskit-hmm can only copy from samples.
+- tsinfer's recorded times are for whole groups, run with many threads
+  on a 196-core node. We report its CPU time per haplotype, which includes
+  reading genotypes and building the tree sequence, not just the HMM.
+- `tsinfer_groups.py` uses tsinfer's private `config._parse_config` and
+  `pipeline._build_jobs_with_metadata`, because the config has no API for
+  changing its (absolute, cluster) paths. tsinfer's `match` with
+  `reference_ts` cannot be used to restart from a given tree sequence
+  ([tsinfer#1185](https://github.com/tskit-dev/tsinfer/issues/1185)),
+  which is why the workloads call the HMM directly.
+- The local tsinfer checkout used for grouping was at `186e1af`
+  (a descendant of `cb5017e`); the groups are checked against the data
+  as described above.
+
+
+### Findings so far (October 2026)
+
+Run one query at a time on a 4-core machine with 15 GB of RAM. Ancestor
+groups 1483–1485 are random subsets of 500. tsinfer's time is its CPU time
+for the whole group divided by the number of haplotypes.
+
+| workload | queries | mean sites | same path as tsinfer | tsinfer-hmm mean time | tsls mean time | tsinfer recorded |
+|---|---|---|---|---|---|---|
+| ancestors, group 84 | 144 of 144 | 1,390 | 100% (both) | 4.3 ms | 5.2 ms | 9.0 ms |
+| ancestors, group 1000 | 70 of 70 | 2,950 | 100% (both) | 9.9 ms | 10.9 ms | 13.6 ms |
+| ancestors, group 1483 | 500 of 25,935 | 12,200 | 100% (both) | 68 ms | 73 ms | 60 ms |
+| ancestors, group 1484 | 500 of 40,684 | 62,000 | 100% (both) | 182 ms | 189 ms | 214 ms |
+| ancestors, group 1485 | 500 of 79,127 | 40,200 | 100% (both) | 154 ms | 170 ms | 166 ms |
+| samples | 200 of 6,404 | 580,909 | 100% (both) | 2.53 s | 2.80 s | 3.54 s |
+
+- Both engines find exactly the path tsinfer found for every query, so
+  they are drop-in replacements for tsinfer's matcher on this data.
+  Sample paths have no mismatches. Ancestor paths have one or two
+  mismatches on average: the ancestor's focal sites, whose mutations are
+  not yet in the tree sequence.
+- tsls is 3–10% slower than tsinfer-hmm in mean time per query, with the
+  same matcher memory (64 MiB for ancestors, about 90 MiB for samples)
+  and traceback sizes. Building tsls's `MatcherIndexes` takes several
+  times longer (3.6 s against 0.4 s for the full ancestors tree
+  sequence), but this is done once per group.
+- Per-query times are close to tsinfer's per-haplotype CPU time, so the
+  HMM accounts for most of tsinfer's matching cost.
+- The cost is in the last few ancestor groups and the samples. Matching
+  all 6,404 samples takes about 4.5 CPU hours with either engine.

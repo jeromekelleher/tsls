@@ -15,6 +15,7 @@ metadata are original IDs if the ARG is a sub-ARG (see subargs.py).
 """
 
 import dataclasses
+import json
 import pathlib
 
 import click
@@ -158,16 +159,105 @@ class QuerySet:
         self.dataframe().to_csv(out_dir / "queries.csv", index=False)
 
 
+class WindowedHaplotypes:
+    """
+    Query haplotypes that are only defined over a window of sites, such as
+    tsinfer ancestors. Query j has the specified values at sites start[j] to
+    end[j] (exclusive) and is missing elsewhere. The values of all queries
+    are concatenated in a single array, so that short queries over many sites
+    do not need much space.
+    """
+
+    def __init__(self, num_sites, start, end, values):
+        self.num_sites = num_sites
+        self.start = np.asarray(start, dtype=np.int64)
+        self.end = np.asarray(end, dtype=np.int64)
+        self.values = np.asarray(values, dtype=np.int8)
+        lengths = self.end - self.start
+        assert np.all(lengths >= 0)
+        assert np.all(self.end <= num_sites)
+        self.offsets = np.concatenate([[0], np.cumsum(lengths)])
+        assert self.offsets[-1] == len(self.values)
+
+    @staticmethod
+    def from_windows(num_sites, start, windows):
+        """
+        Return the WindowedHaplotypes made from the specified start sites and
+        list of window value arrays.
+        """
+        start = np.asarray(start, dtype=np.int64)
+        end = start + np.array([len(w) for w in windows], dtype=np.int64)
+        values = np.concatenate([np.zeros(0, dtype=np.int8), *windows])
+        return WindowedHaplotypes(num_sites, start, end, values)
+
+    def __len__(self):
+        return len(self.start)
+
+    def window(self, j):
+        return self.values[self.offsets[j] : self.offsets[j + 1]]
+
+    def __getitem__(self, j):
+        h = np.full(self.num_sites, MISSING, dtype=np.int8)
+        h[self.start[j] : self.end[j]] = self.window(j)
+        return h
+
+    def save(self, out_dir, positions, df):
+        assert len(df) == len(self)
+        assert len(positions) == self.num_sites
+        out_dir = pathlib.Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            out_dir / "queries.npz",
+            positions=positions,
+            start=self.start,
+            end=self.end,
+            values=self.values,
+        )
+        df.to_csv(out_dir / "queries.csv", index=False)
+
+
 def load_queries(query_dir):
     """
     Return the (H, positions, metadata) tuple for the query set in the
-    specified directory.
+    specified directory. H is either an array with one row per query, or
+    a WindowedHaplotypes; both give the haplotype of query j as H[j].
     """
     query_dir = pathlib.Path(query_dir)
     data = np.load(query_dir / "queries.npz")
     df = pd.read_csv(query_dir / "queries.csv")
-    assert len(df) == data["H"].shape[0]
-    return data["H"], data["positions"], df
+    positions = data["positions"]
+    if "values" in data:
+        H = WindowedHaplotypes(
+            len(positions), data["start"], data["end"], data["values"]
+        )
+    else:
+        H = data["H"]
+    assert len(df) == len(H)
+    return H, positions, df
+
+
+def query_window(H, query_id):
+    """
+    Return the (start, end) tuple of the sites to match for the specified
+    query.
+    """
+    if isinstance(H, WindowedHaplotypes):
+        return int(H.start[query_id]), int(H.end[query_id])
+    return 0, H.shape[1]
+
+
+def load_model(query_dir):
+    """
+    Return the model parameters stored with the query set in the specified
+    directory, or None if there are none. Query sets made from tsinfer runs
+    store the parameters tsinfer used, which take the place of the sc2ts
+    style parameters chosen by run.py.
+    """
+    path = pathlib.Path(query_dir) / "model.json"
+    if not path.exists():
+        return None
+    with open(path) as f:
+        return json.load(f)
 
 
 def add_copy_queries(query_set, ts, rng, *, num_nodes, divergence):

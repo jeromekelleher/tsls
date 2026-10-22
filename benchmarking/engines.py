@@ -103,41 +103,64 @@ def path_haplotype(ts, left, right, parent):
     return G[np.arange(ts.num_sites), index[segment]].astype(np.int8)
 
 
-class TsinferEngine:
+class AncestorMatcherEngine:
     """
+    Base class for the engines with tsinfer's AncestorMatcher interface,
+    which differ only in how the MatcherIndexes are made.
+
     If mismatch_threshold is specified, normalised likelihoods are not
     allowed to drop below that of mismatch_threshold mismatches, as in
     sc2ts. This bounds the number of distinct likelihood values, and so
     the time and memory needed, at the cost of exactness.
+
+    By default, states are encoded as indexes into ALLELES. If alleles is
+    None, the ancestral state of every site is 0 and every mutation has
+    derived state 1, as in tsinfer. weight_by_n is False as in sc2ts;
+    tsinfer uses True.
     """
 
-    name = "tsinfer"
+    module = None
 
-    def __init__(self, ts, *, mu, rho, mismatch_threshold=None):
+    def __init__(
+        self,
+        ts,
+        *,
+        mu,
+        rho,
+        mismatch_threshold=None,
+        weight_by_n=False,
+        alleles=ALLELES,
+    ):
         self.num_sites = ts.num_sites
         self.mu = mu
         self.rho = rho
+        self.weight_by_n = weight_by_n
         self.likelihood_threshold = None
         if mismatch_threshold is not None:
             self.likelihood_threshold = mu**mismatch_threshold * 0.99
         self.recombination = np.full(ts.num_sites, rho)
         self.mismatch = np.full(ts.num_sites, mu)
-        self.matcher_indexes = tsinfer_hmm.MatcherIndexes(
-            ts, vestigial_root=False, alleles=ALLELES
-        )
+        self.matcher_indexes = self.make_matcher_indexes(ts, alleles)
 
-    def match(self, h):
-        matcher = tsinfer_hmm.AncestorMatcher(
+    def make_matcher_indexes(self, ts, alleles):
+        raise NotImplementedError
+
+    def match(self, h, start=0, end=None):
+        """
+        Match the specified haplotype over the sites from start to end
+        (exclusive). The path covers only these sites.
+        """
+        if end is None:
+            end = self.num_sites
+        matcher = self.module.AncestorMatcher(
             self.matcher_indexes,
             self.recombination,
             self.mismatch,
             likelihood_threshold=self.likelihood_threshold,
-            weight_by_n=False,
+            weight_by_n=self.weight_by_n,
         )
         matched = np.zeros(self.num_sites, dtype=np.int8)
-        left, right, parent = matcher.find_path(
-            h.astype(np.int8), 0, self.num_sites, matched
-        )
+        left, right, parent = matcher.find_path(h.astype(np.int8), start, end, matched)
         stats = {
             "total_memory": matcher.total_memory,
             "mean_traceback_size": matcher.mean_traceback_size,
@@ -149,6 +172,14 @@ class TsinferEngine:
             matched,
             stats,
         )
+
+
+class TsinferEngine(AncestorMatcherEngine):
+    name = "tsinfer"
+    module = tsinfer_hmm
+
+    def make_matcher_indexes(self, ts, alleles):
+        return tsinfer_hmm.MatcherIndexes(ts, vestigial_root=False, alleles=alleles)
 
 
 class TskitEngine:
@@ -203,55 +234,21 @@ class TskitEngine:
         return float(np.sum(np.log(normalisation_factor)) + np.log(n) - m * np.log(stay))
 
 
-class TslsEngine(TsinferEngine):
+class TslsEngine(AncestorMatcherEngine):
     """
     The merged tsls engine, with the same model and options as tsinfer. In
     tsls every node in the tree is a state, so we remove the vestigial root
-    edge 0 -> 1 added by prepare.py to make node 0 isolated, as in sc2ts.
+    edge 0 -> 1 (added by prepare.py, and present in tsinfer's trees) to
+    make node 0 isolated, as in sc2ts.
     """
 
     name = "tsls"
+    module = tsls
 
-    def __init__(self, ts, *, mu, rho, mismatch_threshold=None):
-        self.num_sites = ts.num_sites
-        self.mu = mu
-        self.rho = rho
-        self.likelihood_threshold = None
-        if mismatch_threshold is not None:
-            self.likelihood_threshold = mu**mismatch_threshold * 0.99
-        self.recombination = np.full(ts.num_sites, rho)
-        self.mismatch = np.full(ts.num_sites, mu)
+    def make_matcher_indexes(self, ts, alleles):
         tables = ts.dump_tables()
         tables.edges.keep_rows(tables.edges.parent != 0)
-        self.matcher_indexes = tsls.MatcherIndexes(
-            tables.tree_sequence(), alleles=ALLELES
-        )
-
-    def match(self, h):
-        matcher = tsls.AncestorMatcher(
-            self.matcher_indexes,
-            self.recombination,
-            self.mismatch,
-            likelihood_threshold=self.likelihood_threshold,
-            weight_by_n=False,
-        )
-        matched = np.zeros(self.num_sites, dtype=np.int8)
-        left, right, parent = matcher.find_path(
-            h.astype(np.int8), 0, self.num_sites, matched
-        )
-        stats = {
-            "total_memory": matcher.total_memory,
-            "mean_traceback_size": matcher.mean_traceback_size,
-        }
-        return (
-            left[::-1].astype(np.float64),
-            right[::-1].astype(np.float64),
-            parent[::-1].copy(),
-            matched,
-            stats,
-        )
+        return tsls.MatcherIndexes(tables.tree_sequence(), alleles=alleles)
 
 
-ENGINES = {
-    engine.name: engine for engine in [TsinferEngine, TskitEngine, TslsEngine]
-}
+ENGINES = {engine.name: engine for engine in [TsinferEngine, TskitEngine, TslsEngine]}
